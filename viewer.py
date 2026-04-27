@@ -64,7 +64,7 @@ uniform float uHeadPitch;
 uniform float uHeadRoll;
 uniform float uTanHalfFovX;
 uniform float uTanHalfFovY;
-uniform int   uProjMode;       // 0 testcard, 1 fisheye, 2 equirect
+uniform int   uProjMode;       // 0 testcard, 1 fisheye, 2 equirect, 3 flat-sbs, 4 flat-tb
 uniform int   uShowDebug;
 uniform int   uHasVideo;
 uniform sampler2D uVideo;
@@ -143,6 +143,16 @@ vec3 sampleSbs(vec2 uvEye, bool isLeftEye) {
     return texture(uVideo, vec2(uvEye.x * 0.5 + uOffset, v)).rgb;
 }
 
+// Top-bottom (over/under) SBS sampling: top half is left eye, bottom right.
+vec3 sampleFlatTb(vec2 uvEye, bool isLeftEye) {
+    if (uvEye.x < 0.0 || uvEye.x > 1.0 || uvEye.y < 0.0 || uvEye.y > 1.0) {
+        return vec3(0.0);
+    }
+    float v = isLeftEye ? (uvEye.y * 0.5) : (uvEye.y * 0.5 + 0.5);
+    if (uFlipY == 1) v = 1.0 - v;
+    return texture(uVideo, vec2(uvEye.x, v)).rgb;
+}
+
 // VR180 equiangular fisheye reverse-projection.
 // Source: a circular fisheye that maps a `uFisheyeFovDeg` cone of directions
 // to an inscribed circle. Equiangular means r in image is proportional to
@@ -197,10 +207,18 @@ void main() {
         bool outside;
         vec2 uvImg = fisheyeUv(dLens, outside);
         col = outside ? vec3(0.05) : sampleSbs(uvImg, isLeftEye);
-    } else {
+    } else if (uProjMode == 2) {
         bool outside;
         vec2 uvImg = equirectUv(dLens, outside);
         col = outside ? vec3(0.05) : sampleSbs(uvImg, isLeftEye);
+    } else if (uProjMode == 3) {
+        // Flat side-by-side: source left half = left eye, right half = right
+        // eye. Head tracking is intentionally ignored - the screen stays
+        // glued to the viewport, which feels like watching a fixed 3D screen.
+        col = sampleSbs(eyeUv, isLeftEye);
+    } else {
+        // Flat top-bottom (over/under).
+        col = sampleFlatTb(eyeUv, isLeftEye);
     }
 
     if (uShowDebug == 1) {
@@ -305,9 +323,11 @@ def main() -> int:
                         "57 = XREAL One Pro 1:1 angular mapping (subjects feel "
                         "smaller/farther); 87 = roughly the previous wide-sweep "
                         "default. Lower = more zoom, higher = wider.")
-    p.add_argument("--proj", choices=["testcard", "fisheye", "equirect"],
+    p.add_argument("--proj", choices=["testcard", "fisheye", "equirect", "flat-sbs", "flat-tb"],
                    default=None,
-                   help="initial projection mode (default: fisheye if video given, else testcard)")
+                   help="initial projection mode (default: fisheye if video given, else testcard). "
+                        "fisheye/equirect = VR180 spherical sources; flat-sbs/flat-tb = 3D "
+                        "rectangular videos (no head tracking applied to the image)")
     p.add_argument("--decode-width", type=int, default=None,
                    help="downscale decoded frames to this width (default: source width)")
     p.add_argument("--decode-height", type=int, default=None,
@@ -419,7 +439,10 @@ def main() -> int:
 
     fov_diag_deg = args.fov
     if args.proj is not None:
-        proj_mode = {"testcard": 0, "fisheye": 1, "equirect": 2}[args.proj]
+        proj_mode = {
+            "testcard": 0, "fisheye": 1, "equirect": 2,
+            "flat-sbs": 3, "flat-tb": 4,
+        }[args.proj]
     else:
         proj_mode = 1 if args.video is not None else 0
     show_debug = True
@@ -447,8 +470,9 @@ def main() -> int:
                     pose_stream.recalibrate()
                     print("\n[recalibrating]")
                 elif event.key == pygame.K_m:
-                    proj_mode = (proj_mode + 1) % 3
-                    name = ["testcard", "fisheye(stub)", "equirect(stub)"][proj_mode]
+                    proj_mode = (proj_mode + 1) % 5
+                    name = ["testcard", "fisheye", "equirect",
+                            "flat-sbs", "flat-tb"][proj_mode]
                     print(f"\n[proj mode = {proj_mode} {name}]")
                 elif event.key == pygame.K_d:
                     show_debug = not show_debug
@@ -579,7 +603,7 @@ def main() -> int:
                     fc = video_stream.frame_count
                     sw, sh = video_stream.source_size
                     vid_part = f"  vid {sw}x{sh}->{video_tex_size[0]}x{video_tex_size[1]} fr#{fc}"
-                proj_name = ["test", "fish", "equi"][proj_mode]
+                proj_name = ["test", "fish", "equi", "fSBS", "fTB"][proj_mode]
                 sys.stdout.write(
                     f"\r{conn}  yaw{yaw:+6.1f} pit{pitch:+6.1f} rol{roll:+6.1f}"
                     f"  fov{fov_diag_deg:4.1f} mode={proj_name}{vid_part}  fps{clock.get_fps():4.1f} "

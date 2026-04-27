@@ -123,6 +123,12 @@ TCP IMU stream and renders one of three modes per eye:
   Canon RF 5.2mm dual-fisheye layout).
 * **equirect** — VR180 equirectangular reverse-projection (180° wide
   × 180° tall, two halves SBS).
+* **flat-sbs** — flat 3D video, left half of frame = left eye, right
+  half = right eye. Head tracking is ignored; the picture stays
+  fixed to the viewport like a virtual 3D screen. Use this for
+  ordinary 3D side-by-side files (e.g. Bilibili 4K [3D] dance videos).
+* **flat-tb** — flat 3D top-bottom (over/under): top half = left eye,
+  bottom half = right eye.
 
 ```bash
 pip install -r requirements.txt

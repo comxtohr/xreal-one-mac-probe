@@ -300,8 +300,10 @@ def main() -> int:
                    help="run in a 1920x540 window instead of fullscreen")
     p.add_argument("--no-tracker", action="store_true",
                    help="don't connect to glasses; render with zero pose")
-    p.add_argument("--fov", type=float, default=50.0,
-                   help="initial vertical field of view in degrees (default 50)")
+    p.add_argument("--fov", type=float, default=57.0,
+                   help="initial diagonal field of view in degrees "
+                        "(default 57; matches XREAL One Pro physical diagonal FOV "
+                        "for 1:1 angular mapping. Use ~50 for XREAL One.)")
     p.add_argument("--proj", choices=["testcard", "fisheye", "equirect"],
                    default=None,
                    help="initial projection mode (default: fisheye if video given, else testcard)")
@@ -414,7 +416,7 @@ def main() -> int:
         pose_stream = PoseStream()
         pose_stream.start()
 
-    fov_y_deg = args.fov
+    fov_diag_deg = args.fov
     if args.proj is not None:
         proj_mode = {"testcard": 0, "fisheye": 1, "equirect": 2}[args.proj]
     else:
@@ -465,14 +467,14 @@ def main() -> int:
                     invert_roll = not invert_roll
                     print(f"\n[invert_roll = {invert_roll}]")
                 elif event.key == pygame.K_UP:
-                    fov_y_deg = max(20.0, fov_y_deg - 2.0)
-                    print(f"\n[fov_y = {fov_y_deg:.1f}]")
+                    fov_diag_deg = max(20.0, fov_diag_deg - 2.0)
+                    print(f"\n[fov_diag = {fov_diag_deg:.1f}]")
                 elif event.key == pygame.K_DOWN:
-                    fov_y_deg = min(120.0, fov_y_deg + 2.0)
-                    print(f"\n[fov_y = {fov_y_deg:.1f}]")
+                    fov_diag_deg = min(120.0, fov_diag_deg + 2.0)
+                    print(f"\n[fov_diag = {fov_diag_deg:.1f}]")
                 elif event.key == pygame.K_0:
-                    fov_y_deg = args.fov
-                    print(f"\n[fov_y reset to {fov_y_deg:.1f}]")
+                    fov_diag_deg = args.fov
+                    print(f"\n[fov_diag reset to {fov_diag_deg:.1f}]")
                 elif event.key == pygame.K_f:
                     is_fullscreen = not is_fullscreen
                     new_flags = pygame.OPENGL | pygame.DOUBLEBUF | (
@@ -513,11 +515,13 @@ def main() -> int:
                         )
 
         gl.glUseProgram(program)
-        # Per-eye horizontal FOV: each eye fills half the window. With native
-        # 1:1 per-eye aspect (e.g. 960x960 source) and the SBS framebuffer
-        # being 2:1 (3840x1080), the per-eye target aspect is (w/2)/h.
+        # `fov_diag_deg` is the user-facing diagonal FOV. Convert to per-eye
+        # vertical/horizontal half-FOV-tangents using the per-eye aspect:
+        #   tan(diag/2) = sqrt(aspect^2 + 1) * tan(vfov/2)
+        # so tan(vfov/2) = tan(diag/2) / sqrt(aspect^2 + 1).
         eye_aspect = (w * 0.5) / max(1, h)
-        tan_half_fov_y = float(np.tan(np.radians(fov_y_deg) * 0.5))
+        tan_half_diag = float(np.tan(np.radians(fov_diag_deg) * 0.5))
+        tan_half_fov_y = tan_half_diag / float(np.sqrt(eye_aspect * eye_aspect + 1.0))
         tan_half_fov_x = tan_half_fov_y * eye_aspect
 
         if pose_stream is not None:
@@ -577,7 +581,7 @@ def main() -> int:
                 proj_name = ["test", "fish", "equi"][proj_mode]
                 sys.stdout.write(
                     f"\r{conn}  yaw{yaw:+6.1f} pit{pitch:+6.1f} rol{roll:+6.1f}"
-                    f"  fov{fov_y_deg:4.1f} mode={proj_name}{vid_part}  fps{clock.get_fps():4.1f} "
+                    f"  fov{fov_diag_deg:4.1f} mode={proj_name}{vid_part}  fps{clock.get_fps():4.1f} "
                 )
             sys.stdout.flush()
             last_status_print = now

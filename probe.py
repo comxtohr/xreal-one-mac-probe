@@ -20,6 +20,7 @@ auto-routes that link-local address through the corresponding
 from __future__ import annotations
 
 import argparse
+import errno
 import re
 import select
 import socket
@@ -289,10 +290,25 @@ def main() -> int:
             return cmd_pose(args.host, args.port)
     except (ConnectionRefusedError, OSError) as e:
         print(f"connection failed: {e}", file=sys.stderr)
-        print(
-            f"check that the glasses are connected and `nc -zv {args.host} {args.port}` succeeds.",
-            file=sys.stderr,
-        )
+        if isinstance(e, OSError) and e.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH):
+            print(
+                "\nIf `nc -zv {host} {port}` succeeds but Python doesn't, this is\n"
+                "almost always macOS's Local Network permission gate.\n"
+                "  Quick test:  sudo python3 probe.py dump  (should work)\n"
+                "  Real fix:    System Settings -> Privacy & Security -> Local Network\n"
+                "               -> enable your terminal app (Terminal / iTerm).\n"
+                "  If Terminal isn't in that list:\n"
+                "    tccutil reset All com.apple.Terminal     # then re-run probe.py\n"
+                "    tccutil reset All com.googlecode.iterm2  # for iTerm".format(
+                    host=args.host, port=args.port
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"check that the glasses are connected and `nc -zv {args.host} {args.port}` succeeds.",
+                file=sys.stderr,
+            )
         return 2
     return 0
 

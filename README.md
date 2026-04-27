@@ -11,6 +11,33 @@ from the `vr2xr` project: 6-byte magic header (`0x28|0x27, 0x36, len_be_u32`),
 
 No third-party dependencies — pure stdlib.
 
+## macOS Local Network permission (read this first)
+
+On macOS 14+ Apple gates outbound connections to private/link-local
+addresses (10/8, 192.168/16, **169.254/16**) behind a per-app **Local
+Network** permission. The XREAL One Pro lives at `169.254.2.1`, so the
+terminal app you run `probe.py` from needs that permission, otherwise
+every `connect()` returns `EHOSTUNREACH` (errno 65) even though `nc`
+works (system tools are exempt).
+
+To enable:
+
+1. **System Settings → Privacy & Security → Local Network**
+2. Toggle on your terminal (Terminal / iTerm / Warp / ...).
+3. Re-run `python3 probe.py dump` from that terminal.
+
+If your terminal isn't in the Local Network list, it means the system
+never saw an outbound link-local connection from it yet:
+
+```bash
+tccutil reset All com.apple.Terminal       # for Apple Terminal
+tccutil reset All com.googlecode.iterm2    # for iTerm
+# Then re-run probe.py — the system will pop a one-time prompt; choose Allow.
+```
+
+A one-shot `sudo python3 probe.py dump` also works as a sanity test
+(sudo bypasses the prompt) but is not a long-term workaround.
+
 ## Prerequisites
 
 1. Plug the **XREAL One Pro** into your Mac via USB-C.

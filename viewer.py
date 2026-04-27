@@ -71,6 +71,7 @@ uniform sampler2D uVideo;
 uniform float uFisheyeFovDeg;  // physical FOV of the fisheye lens (typ 180)
 uniform int   uFlipY;          // 0 = sample with image-space v, 1 = flip
 uniform int   uRot90;          // 0/1/2/3 = 0/90/180/270 degree CCW per-eye rotation
+uniform float uCalibProgress;  // -1 = hide overlay, 0..1 = calibration progress
 
 const float PI = 3.14159265359;
 
@@ -206,6 +207,24 @@ void main() {
         if (abs(gl_FragCoord.x - uViewportWidth * 0.5) < 1.5) col = vec3(0.0, 1.0, 0.0);
     }
 
+    // Calibration overlay: a centered horizontal progress bar drawn in
+    // per-eye screen space (eyeUv). Visible in both eyes so the user can't
+    // miss it when wearing the glasses. Hidden after calibration finishes.
+    if (uCalibProgress >= 0.0) {
+        float bx0 = 0.30, bx1 = 0.70;
+        float by0 = 0.46, by1 = 0.49;
+        if (eyeUv.x > bx0 && eyeUv.x < bx1 && eyeUv.y > by0 && eyeUv.y < by1) {
+            float fill = bx0 + clamp(uCalibProgress, 0.0, 1.0) * (bx1 - bx0);
+            col = (eyeUv.x < fill) ? vec3(0.2, 1.0, 0.4) : vec3(0.15, 0.15, 0.18);
+        }
+        // Thin inner border so the bar is readable on any background.
+        bool nearTop    = abs(eyeUv.y - by1) < 0.0015 && eyeUv.x >= bx0 && eyeUv.x <= bx1;
+        bool nearBottom = abs(eyeUv.y - by0) < 0.0015 && eyeUv.x >= bx0 && eyeUv.x <= bx1;
+        bool nearLeft   = abs(eyeUv.x - bx0) < 0.0008 && eyeUv.y >= by0 && eyeUv.y <= by1;
+        bool nearRight  = abs(eyeUv.x - bx1) < 0.0008 && eyeUv.y >= by0 && eyeUv.y <= by1;
+        if (nearTop || nearBottom || nearLeft || nearRight) col = vec3(1.0);
+    }
+
     fragColor = vec4(col, 1.0);
 }
 """
@@ -290,6 +309,10 @@ def main() -> int:
                    help="downscale decoded frames to this width (default 3840)")
     p.add_argument("--decode-height", type=int, default=1920,
                    help="downscale decoded frames to this height (default 1920)")
+    p.add_argument("--native", action="store_true",
+                   help="skip in-decoder downscale; upload frames at the source's "
+                        "native resolution (e.g. 7680x3840 for 8K). Requires enough "
+                        "memory bandwidth on the host.")
     p.add_argument("--fisheye-fov", type=float, default=180.0,
                    help="physical FOV of the fisheye lens in degrees (default 180)")
     p.add_argument("--mute", action="store_true",
@@ -353,6 +376,7 @@ def main() -> int:
     u_fisheye_fov = gl.glGetUniformLocation(program, "uFisheyeFovDeg")
     u_flip_y = gl.glGetUniformLocation(program, "uFlipY")
     u_rot90  = gl.glGetUniformLocation(program, "uRot90")
+    u_calib  = gl.glGetUniformLocation(program, "uCalibProgress")
 
     # Video setup
     video_stream = None
@@ -363,8 +387,8 @@ def main() -> int:
         from xreal_one.video import VideoStream  # lazy: avoids importing av in --no-video runs
         video_stream = VideoStream(
             args.video,
-            target_width=args.decode_width,
-            target_height=args.decode_height,
+            target_width=None if args.native else args.decode_width,
+            target_height=None if args.native else args.decode_height,
             loop=True,
         )
         video_stream.start()
@@ -523,6 +547,8 @@ def main() -> int:
         gl.glUniform1f(u_fisheye_fov, args.fisheye_fov)
         gl.glUniform1i(u_flip_y, 1 if flip_y else 0)
         gl.glUniform1i(u_rot90, rot90)
+        # Show overlay only while not yet calibrated; -1 hides it.
+        gl.glUniform1f(u_calib, calib if pose_stream is not None and not calibrated else -1.0)
         if video_stream is not None:
             gl.glActiveTexture(gl.GL_TEXTURE0)
             gl.glBindTexture(gl.GL_TEXTURE_2D, video_tex)

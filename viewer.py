@@ -70,6 +70,7 @@ uniform int   uHasVideo;
 uniform sampler2D uVideo;
 uniform float uFisheyeFovDeg;  // physical FOV of the fisheye lens (typ 180)
 uniform int   uFlipY;          // 0 = sample with image-space v, 1 = flip
+uniform int   uRot90;          // 0/1/2/3 = 0/90/180/270 degree CCW per-eye rotation
 
 const float PI = 3.14159265359;
 
@@ -93,10 +94,19 @@ vec3 testCardColor(vec3 d) {
     return base;
 }
 
+vec2 rotateAroundCenter(vec2 uv, int rot) {
+    vec2 c = uv - 0.5;
+    if (rot == 1)      c = vec2( c.y, -c.x);   // 90 CCW (display rotates CW)
+    else if (rot == 2) c = -c;                 // 180
+    else if (rot == 3) c = vec2(-c.y,  c.x);   // 270 CCW (display rotates CCW)
+    return c + 0.5;
+}
+
 // Sample SBS video texture at per-eye UV in [0,1]^2 (image-space, top-left
 // origin: y=0 means top of source frame). Source layout: left-eye in left
 // half (u in [0,0.5]), right-eye in right half.
 vec3 sampleSbs(vec2 uvEye, bool isLeftEye) {
+    uvEye = rotateAroundCenter(uvEye, uRot90);
     if (uvEye.x < 0.0 || uvEye.x > 1.0 || uvEye.y < 0.0 || uvEye.y > 1.0) {
         return vec3(0.0);
     }
@@ -253,6 +263,10 @@ def main() -> int:
                    help="physical FOV of the fisheye lens in degrees (default 180)")
     p.add_argument("--mute", action="store_true",
                    help="don't play audio (default plays via ffplay/afplay)")
+    p.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
+                   help="rotate per-eye sampling by N degrees CCW (default 0)")
+    p.add_argument("--flip-y", action="store_true",
+                   help="vertically flip the per-eye sampling")
     args = p.parse_args()
 
     pygame.init()
@@ -298,6 +312,7 @@ def main() -> int:
     u_video  = gl.glGetUniformLocation(program, "uVideo")
     u_fisheye_fov = gl.glGetUniformLocation(program, "uFisheyeFovDeg")
     u_flip_y = gl.glGetUniformLocation(program, "uFlipY")
+    u_rot90  = gl.glGetUniformLocation(program, "uRot90")
 
     # Video setup
     video_stream = None
@@ -342,7 +357,8 @@ def main() -> int:
     else:
         proj_mode = 1 if args.video is not None else 0
     show_debug = True
-    flip_y = False
+    flip_y = args.flip_y
+    rot90 = (args.rotate // 90) % 4
     is_fullscreen = not args.windowed
 
     clock = pygame.time.Clock()
@@ -370,6 +386,9 @@ def main() -> int:
                 elif event.key == pygame.K_v:
                     flip_y = not flip_y
                     print(f"\n[flip_y = {flip_y}]")
+                elif event.key == pygame.K_o:
+                    rot90 = (rot90 + 1) % 4
+                    print(f"\n[rotate = {rot90 * 90} deg]")
                 elif event.key == pygame.K_UP:
                     fov_y_deg = min(120.0, fov_y_deg + 2.0)
                     print(f"\n[fov_y = {fov_y_deg:.1f}]")
@@ -447,6 +466,7 @@ def main() -> int:
         gl.glUniform1i(u_hasvid, 1 if video_stream is not None and video_tex_size[0] > 0 else 0)
         gl.glUniform1f(u_fisheye_fov, args.fisheye_fov)
         gl.glUniform1i(u_flip_y, 1 if flip_y else 0)
+        gl.glUniform1i(u_rot90, rot90)
         if video_stream is not None:
             gl.glActiveTexture(gl.GL_TEXTURE0)
             gl.glBindTexture(gl.GL_TEXTURE_2D, video_tex)

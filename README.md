@@ -161,6 +161,7 @@ sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 | M   | cycle projection mode (testcard / fisheye / equirect) |
 | ↑/↓ | adjust rendered FOV |
 | V   | toggle vertical flip (use if the source content is upside-down) |
+| O   | cycle 0 / 90 / 180 / 270 deg per-eye rotation (source layout varies) |
 | D   | toggle the green SBS-split debug line |
 | Q   | quit |
 

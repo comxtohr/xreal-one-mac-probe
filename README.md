@@ -160,8 +160,13 @@ sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 | R   | recalibrate gyro (keep glasses still!) |
 | M   | cycle projection mode (testcard / fisheye / equirect) |
 | ↑/↓ | adjust rendered FOV |
+| V   | toggle vertical flip (use if the source content is upside-down) |
 | D   | toggle the green SBS-split debug line |
 | Q   | quit |
+
+Audio: by default the viewer spawns `ffplay -nodisp -loop 0` (or falls
+back to macOS `afplay`) on the same video file so the AAC track plays
+through the system speakers. Pass `--mute` to disable.
 
 ## Provenance
 

@@ -300,10 +300,10 @@ def main() -> int:
                    help="run in a 1920x540 window instead of fullscreen")
     p.add_argument("--no-tracker", action="store_true",
                    help="don't connect to glasses; render with zero pose")
-    p.add_argument("--fov", type=float, default=57.0,
-                   help="initial diagonal field of view in degrees "
-                        "(default 57; matches XREAL One Pro physical diagonal FOV "
-                        "for 1:1 angular mapping. Use ~50 for XREAL One.)")
+    p.add_argument("--fov", type=float, default=50.0,
+                   help="initial diagonal field of view in degrees (default 50). "
+                        "57 matches XREAL One Pro 1:1 angular mapping; lower = "
+                        "more zoom (subjects feel closer); higher = wider sweep.")
     p.add_argument("--proj", choices=["testcard", "fisheye", "equirect"],
                    default=None,
                    help="initial projection mode (default: fisheye if video given, else testcard)")

@@ -298,8 +298,10 @@ def main() -> int:
                    help="rotate per-eye sampling by N degrees CCW (default 0)")
     p.add_argument("--flip-y", action="store_true",
                    help="vertically flip the per-eye sampling")
-    p.add_argument("--invert-pitch", action="store_true",
-                   help="invert pitch sign")
+    p.add_argument("--invert-pitch", action="store_true", default=True,
+                   help="invert pitch sign (default true; XREAL One pitch axis is "
+                        "opposite the rotX-around-+X convention used in the shader)")
+    p.add_argument("--no-invert-pitch", dest="invert_pitch", action="store_false")
     p.add_argument("--invert-yaw", action="store_true",
                    help="invert yaw sign")
     p.add_argument("--invert-roll", action="store_true",

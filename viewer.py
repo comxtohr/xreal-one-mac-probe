@@ -465,11 +465,14 @@ def main() -> int:
                     invert_roll = not invert_roll
                     print(f"\n[invert_roll = {invert_roll}]")
                 elif event.key == pygame.K_UP:
-                    fov_y_deg = min(120.0, fov_y_deg + 2.0)
-                    print(f"\n[fov_y = {fov_y_deg:.1f}]")
-                elif event.key == pygame.K_DOWN:
                     fov_y_deg = max(20.0, fov_y_deg - 2.0)
                     print(f"\n[fov_y = {fov_y_deg:.1f}]")
+                elif event.key == pygame.K_DOWN:
+                    fov_y_deg = min(120.0, fov_y_deg + 2.0)
+                    print(f"\n[fov_y = {fov_y_deg:.1f}]")
+                elif event.key == pygame.K_0:
+                    fov_y_deg = args.fov
+                    print(f"\n[fov_y reset to {fov_y_deg:.1f}]")
                 elif event.key == pygame.K_f:
                     is_fullscreen = not is_fullscreen
                     new_flags = pygame.OPENGL | pygame.DOUBLEBUF | (

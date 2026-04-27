@@ -215,10 +215,12 @@ void main() {
         // Flat side-by-side: source left half = left eye, right half = right
         // eye. Head tracking is intentionally ignored - the screen stays
         // glued to the viewport, which feels like watching a fixed 3D screen.
-        col = sampleSbs(eyeUv, isLeftEye);
+        // eyeUv is in screen space (y=0 at screen bottom); sampleSbs expects
+        // image space (y=0 at frame top), so flip v on the way in.
+        col = sampleSbs(vec2(eyeUv.x, 1.0 - eyeUv.y), isLeftEye);
     } else {
-        // Flat top-bottom (over/under).
-        col = sampleFlatTb(eyeUv, isLeftEye);
+        // Flat top-bottom (over/under). Same screen->image v flip.
+        col = sampleFlatTb(vec2(eyeUv.x, 1.0 - eyeUv.y), isLeftEye);
     }
 
     if (uShowDebug == 1) {

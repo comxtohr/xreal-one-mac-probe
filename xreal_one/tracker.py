@@ -32,9 +32,9 @@ _RAD_PER_SEC_TO_DEG_PER_SEC = 180.0 / math.pi
 # motionless and slowly walk the residual bias toward whatever the gyro is
 # reading. With a 1 kHz IMU, alpha=2e-4 gives roughly 5-second time-constant
 # correction of small residual drift while leaving real motion unaffected.
-_STILL_THRESHOLD_RAD_S = 0.01      # ~0.57 deg/s
-_STILL_HOLD_SAMPLES = 200          # ~0.2 s of stillness before bias refines
-_STILL_BIAS_ALPHA = 2.0e-4
+_STILL_THRESHOLD_RAD_S = 0.012     # ~0.69 deg/s; wider window catches normal head pose
+_STILL_HOLD_SAMPLES = 50           # ~50 ms of stillness before bias refines
+_STILL_BIAS_ALPHA = 1.0e-3         # ~1 s time-constant correction
 
 # Motion gate during the initial calibration. If gyro magnitude exceeds this
 # threshold during the 500-sample collection, we treat the sample as

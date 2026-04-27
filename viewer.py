@@ -345,7 +345,10 @@ def main() -> int:
         flags = pygame.OPENGL | pygame.DOUBLEBUF
     else:
         size = native_size
-        flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.NOFRAME
+        # FULLSCREEN takes the display exclusively so the dock and menu bar
+        # don't overlap; size matches native_size so SDL doesn't trigger a
+        # mode change.
+        flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.FULLSCREEN
     try:
         screen = pygame.display.set_mode(size, flags, display=display_idx, vsync=1)
     except TypeError:
@@ -470,7 +473,7 @@ def main() -> int:
                 elif event.key == pygame.K_f:
                     is_fullscreen = not is_fullscreen
                     new_flags = pygame.OPENGL | pygame.DOUBLEBUF | (
-                        pygame.NOFRAME if is_fullscreen else 0
+                        pygame.FULLSCREEN if is_fullscreen else 0
                     )
                     new_size = native_size if is_fullscreen else (1920, 540)
                     try:

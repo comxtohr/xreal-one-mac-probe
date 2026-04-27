@@ -68,6 +68,13 @@ class HeadTracker:
         self._calib_count = 0
         self._calibrated = False
 
+        # Latest tracker-frame accel during calibration; used to seed pose
+        # so the complementary filter doesn't snap from 0 to gravity-derived
+        # angles in the first ~75 ms after calibration completes.
+        self._last_ax_t = 0.0
+        self._last_ay_t = 0.0
+        self._last_az_t = 0.0
+
         self._pitch = 0.0
         self._yaw = 0.0
         self._roll = 0.0
@@ -123,12 +130,47 @@ class HeadTracker:
             self._gyro_sum[0] += report.gx
             self._gyro_sum[1] += report.gy
             self._gyro_sum[2] += report.gz
+            self._last_ax_t = ax_t
+            self._last_ay_t = ay_t
+            self._last_az_t = az_t
             self._calib_count += 1
             if self._calib_count >= self.calibration_target:
                 divisor = max(1, self._calib_count)
                 self._gyro_bias = [s / divisor for s in self._gyro_sum]
                 self._calibrated = True
-                self._pitch = self._yaw = self._roll = 0.0
+
+                # Seed absolute pose from the latest accel reading so the
+                # complementary filter doesn't have to converge from 0 to
+                # gravity-derived angles (which looked like a sudden 90 deg
+                # snap on the user's display).
+                accel_mag = math.sqrt(
+                    self._last_ax_t * self._last_ax_t +
+                    self._last_ay_t * self._last_ay_t +
+                    self._last_az_t * self._last_az_t
+                )
+                if accel_mag > 0.01:
+                    self._pitch = math.degrees(math.atan2(
+                        -self._last_ax_t,
+                        math.sqrt(
+                            self._last_ay_t * self._last_ay_t +
+                            self._last_az_t * self._last_az_t
+                        ),
+                    ))
+                    self._roll = math.degrees(math.atan2(
+                        self._last_ay_t, self._last_az_t
+                    ))
+                else:
+                    self._pitch = 0.0
+                    self._roll = 0.0
+                self._yaw = 0.0
+
+                # Auto-zero so relative pose starts at (0, 0, 0) regardless
+                # of how the glasses were physically oriented during the
+                # calibration phase.
+                self._zero_pitch = self._pitch
+                self._zero_yaw = self._yaw
+                self._zero_roll = self._roll
+
                 self._last_ts_ns = None
             return None
 

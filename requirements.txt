@@ -1,5 +1,5 @@
-# Phase 1 (test-card + head tracking) dependencies.
-# Phase 2 will add `av` for video decoding.
+# Phase 1+2 dependencies.
 pygame>=2.5
 PyOpenGL>=3.1.6
 numpy>=1.24
+av>=11.0       # PyAV: ffmpeg bindings for HEVC/H.264 decode

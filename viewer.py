@@ -66,6 +66,9 @@ uniform float uTanHalfFovX;
 uniform float uTanHalfFovY;
 uniform int   uProjMode;       // 0 testcard, 1 fisheye, 2 equirect
 uniform int   uShowDebug;
+uniform int   uHasVideo;
+uniform sampler2D uVideo;
+uniform float uFisheyeFovDeg;  // physical FOV of the fisheye lens (typ 180)
 
 const float PI = 3.14159265359;
 
@@ -74,29 +77,59 @@ mat3 rotX(float a) { float c=cos(a), s=sin(a); return mat3(1,0,0, 0,c,-s, 0,s,c)
 mat3 rotZ(float a) { float c=cos(a), s=sin(a); return mat3(c,-s,0, s,c,0, 0,0,1); }
 
 vec3 testCardColor(vec3 d) {
-    // d is the world-space view direction (after head rotation).
-    // Convert to "world" yaw/pitch.
     float yaw   = degrees(atan(d.x, d.z));
     float pitch = degrees(asin(clamp(d.y, -1.0, 1.0)));
 
-    // Base color from direction so motion is obvious.
     vec3 base = 0.5 + 0.5 * d;
-
-    // Grid lines every 15 degrees.
     float yaw_dist   = abs(mod(yaw   + 7.5, 15.0) - 7.5);
     float pitch_dist = abs(mod(pitch + 7.5, 15.0) - 7.5);
     float grid = smoothstep(0.6, 0.0, min(yaw_dist, pitch_dist));
     base = mix(base, vec3(1.0), grid * 0.6);
-
-    // Major axes (yaw=0, pitch=0) bold red.
     if (abs(yaw) < 0.5 || abs(pitch) < 0.5) base = mix(base, vec3(1.0, 0.2, 0.2), 0.85);
-
-    // Forward crosshair (within 4 deg of +Z).
     if (abs(yaw) < 4.0 && abs(pitch) < 4.0) {
         if (abs(yaw) < 0.4 || abs(pitch) < 0.4) base = vec3(1.0, 1.0, 0.2);
     }
-
     return base;
+}
+
+// Sample SBS video texture at per-eye UV in [0,1]^2 (image-space, top-left).
+// Source layout: left-eye in left half (u in [0,0.5]), right-eye in right half.
+vec3 sampleSbs(vec2 uvEye, bool isLeftEye) {
+    if (uvEye.x < 0.0 || uvEye.x > 1.0 || uvEye.y < 0.0 || uvEye.y > 1.0) {
+        return vec3(0.0);
+    }
+    float uOffset = isLeftEye ? 0.0 : 0.5;
+    // Image rows in video frames have origin at top, OpenGL textures sample
+    // with origin at bottom-left -> flip v.
+    vec2 sampleUv = vec2(uvEye.x * 0.5 + uOffset, 1.0 - uvEye.y);
+    return texture(uVideo, sampleUv).rgb;
+}
+
+// VR180 equiangular fisheye reverse-projection.
+// Source: a circular fisheye that maps a `uFisheyeFovDeg` cone of directions
+// to an inscribed circle. Equiangular means r in image is proportional to
+// theta (angle from the lens forward axis).
+//
+// Returns the per-eye image-space UV, plus an `outside` flag.
+vec2 fisheyeUv(vec3 d, out bool outside) {
+    outside = false;
+    // theta from forward axis (+Z): 0 in front, pi at directly behind.
+    float theta = acos(clamp(d.z, -1.0, 1.0));
+    float halfFov = radians(uFisheyeFovDeg) * 0.5;
+    if (theta > halfFov) { outside = true; return vec2(0.5); }
+    float phi = atan(d.y, d.x);
+    float r = theta / halfFov;          // 0 center, 1 fisheye edge
+    return vec2(0.5 + 0.5 * r * cos(phi), 0.5 + 0.5 * r * sin(phi));
+}
+
+// VR180 equirectangular reverse-projection (180 horizontal x 180 vertical).
+// Source maps (yaw in [-90,90], pitch in [-90,90]) to a square per eye.
+vec2 equirectUv(vec3 d, out bool outside) {
+    outside = false;
+    float phi   = atan(d.x, d.z);              // [-pi, pi], forward = 0
+    float theta = asin(clamp(d.y, -1.0, 1.0)); // [-pi/2, pi/2]
+    if (abs(phi) > PI * 0.5) { outside = true; return vec2(0.5); }
+    return vec2(0.5 + phi / PI, 0.5 - theta / PI);
 }
 
 void main() {
@@ -104,12 +137,9 @@ void main() {
     float halfX = isLeftEye ? gl_FragCoord.x : (gl_FragCoord.x - uViewportWidth * 0.5);
     vec2 eyeUv = vec2(halfX / (uViewportWidth * 0.5), vUv.y);
 
-    // Build a ray in camera space from per-eye NDC.
     vec2 ndc = eyeUv * 2.0 - 1.0;
     vec3 dir = normalize(vec3(ndc.x * uTanHalfFovX, ndc.y * uTanHalfFovY, 1.0));
 
-    // Apply head rotation: we rotate the world the OPPOSITE way of the head,
-    // so when the user turns their head right, the scene appears to slide left.
     float yaw   = radians(uHeadYaw);
     float pitch = radians(uHeadPitch);
     float roll  = radians(uHeadRoll);
@@ -117,19 +147,18 @@ void main() {
     vec3 d = R * dir;
 
     vec3 col;
-    if (uProjMode == 0) {
-        // Phase 1: head-tracked test card, no video needed.
+    if (uProjMode == 0 || uHasVideo == 0) {
         col = testCardColor(d);
     } else if (uProjMode == 1) {
-        // Phase 2 placeholder: VR180 equiangular fisheye reverse-projection.
-        // Stubbed to test card until video texture is wired up.
-        col = testCardColor(d);
+        bool outside;
+        vec2 uvImg = fisheyeUv(d, outside);
+        col = outside ? vec3(0.05) : sampleSbs(uvImg, isLeftEye);
     } else {
-        // Phase 2 placeholder: VR180 equirectangular reverse-projection.
-        col = testCardColor(d);
+        bool outside;
+        vec2 uvImg = equirectUv(d, outside);
+        col = outside ? vec3(0.05) : sampleSbs(uvImg, isLeftEye);
     }
 
-    // Edge-of-eye separator for visual confirmation of the SBS split.
     if (uShowDebug == 1) {
         if (abs(gl_FragCoord.x - uViewportWidth * 0.5) < 1.5) col = vec3(0.0, 1.0, 0.0);
     }
@@ -201,14 +230,25 @@ def _pick_display(want_index: Optional[int]) -> Tuple[int, Tuple[int, int]]:
 
 def main() -> int:
     p = argparse.ArgumentParser()
+    p.add_argument("video", nargs="?", default=None,
+                   help="path to a VR180 SBS video file (omitted = test card only)")
     p.add_argument("--display", type=int, default=None,
                    help="display index (default: auto-pick a >=3000 wide one)")
     p.add_argument("--windowed", action="store_true",
                    help="run in a 1920x540 window instead of fullscreen")
     p.add_argument("--no-tracker", action="store_true",
-                   help="don't connect to glasses; render with zero pose (for offline GL test)")
+                   help="don't connect to glasses; render with zero pose")
     p.add_argument("--fov", type=float, default=50.0,
                    help="initial vertical field of view in degrees (default 50)")
+    p.add_argument("--proj", choices=["testcard", "fisheye", "equirect"],
+                   default=None,
+                   help="initial projection mode (default: fisheye if video given, else testcard)")
+    p.add_argument("--decode-width", type=int, default=3840,
+                   help="downscale decoded frames to this width (default 3840)")
+    p.add_argument("--decode-height", type=int, default=1920,
+                   help="downscale decoded frames to this height (default 1920)")
+    p.add_argument("--fisheye-fov", type=float, default=180.0,
+                   help="physical FOV of the fisheye lens in degrees (default 180)")
     args = p.parse_args()
 
     pygame.init()
@@ -243,13 +283,38 @@ def main() -> int:
     program = _link_program(VERTEX_SRC, FRAGMENT_SRC)
     vao, _vbo = _make_fullscreen_quad()
     u_viewport_width = gl.glGetUniformLocation(program, "uViewportWidth")
-    u_yaw   = gl.glGetUniformLocation(program, "uHeadYaw")
-    u_pitch = gl.glGetUniformLocation(program, "uHeadPitch")
-    u_roll  = gl.glGetUniformLocation(program, "uHeadRoll")
-    u_fovx  = gl.glGetUniformLocation(program, "uTanHalfFovX")
-    u_fovy  = gl.glGetUniformLocation(program, "uTanHalfFovY")
-    u_mode  = gl.glGetUniformLocation(program, "uProjMode")
-    u_debug = gl.glGetUniformLocation(program, "uShowDebug")
+    u_yaw    = gl.glGetUniformLocation(program, "uHeadYaw")
+    u_pitch  = gl.glGetUniformLocation(program, "uHeadPitch")
+    u_roll   = gl.glGetUniformLocation(program, "uHeadRoll")
+    u_fovx   = gl.glGetUniformLocation(program, "uTanHalfFovX")
+    u_fovy   = gl.glGetUniformLocation(program, "uTanHalfFovY")
+    u_mode   = gl.glGetUniformLocation(program, "uProjMode")
+    u_debug  = gl.glGetUniformLocation(program, "uShowDebug")
+    u_hasvid = gl.glGetUniformLocation(program, "uHasVideo")
+    u_video  = gl.glGetUniformLocation(program, "uVideo")
+    u_fisheye_fov = gl.glGetUniformLocation(program, "uFisheyeFovDeg")
+
+    # Video setup
+    video_stream = None
+    video_tex = 0
+    video_tex_size: Tuple[int, int] = (0, 0)
+    last_uploaded_pts = -1.0
+    if args.video is not None:
+        from xreal_one.video import VideoStream  # lazy: avoids importing av in --no-video runs
+        video_stream = VideoStream(
+            args.video,
+            target_width=args.decode_width,
+            target_height=args.decode_height,
+            loop=True,
+        )
+        video_stream.start()
+        video_tex = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, video_tex)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
 
     # Tracker
     pose_stream: Optional[PoseStream] = None
@@ -258,7 +323,10 @@ def main() -> int:
         pose_stream.start()
 
     fov_y_deg = args.fov
-    proj_mode = 0
+    if args.proj is not None:
+        proj_mode = {"testcard": 0, "fisheye": 1, "equirect": 2}[args.proj]
+    else:
+        proj_mode = 1 if args.video is not None else 0
     show_debug = True
     is_fullscreen = not args.windowed
 
@@ -308,6 +376,27 @@ def main() -> int:
         gl.glClearColor(0.0, 0.0, 0.0, 1.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
+        # Pull and (re)upload latest video frame.
+        if video_stream is not None:
+            latest = video_stream.latest()
+            if latest is not None:
+                arr, pts = latest
+                if pts != last_uploaded_pts:
+                    last_uploaded_pts = pts
+                    fh, fw = arr.shape[0], arr.shape[1]
+                    gl.glBindTexture(gl.GL_TEXTURE_2D, video_tex)
+                    if (fw, fh) != video_tex_size:
+                        gl.glTexImage2D(
+                            gl.GL_TEXTURE_2D, 0, gl.GL_RGB, fw, fh, 0,
+                            gl.GL_RGB, gl.GL_UNSIGNED_BYTE, arr,
+                        )
+                        video_tex_size = (fw, fh)
+                    else:
+                        gl.glTexSubImage2D(
+                            gl.GL_TEXTURE_2D, 0, 0, 0, fw, fh,
+                            gl.GL_RGB, gl.GL_UNSIGNED_BYTE, arr,
+                        )
+
         gl.glUseProgram(program)
         # Per-eye horizontal FOV: each eye fills half the window. With native
         # 1:1 per-eye aspect (e.g. 960x960 source) and the SBS framebuffer
@@ -337,6 +426,12 @@ def main() -> int:
         gl.glUniform1f(u_fovy, tan_half_fov_y)
         gl.glUniform1i(u_mode, proj_mode)
         gl.glUniform1i(u_debug, 1 if show_debug else 0)
+        gl.glUniform1i(u_hasvid, 1 if video_stream is not None and video_tex_size[0] > 0 else 0)
+        gl.glUniform1f(u_fisheye_fov, args.fisheye_fov)
+        if video_stream is not None:
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, video_tex)
+            gl.glUniform1i(u_video, 0)
 
         gl.glBindVertexArray(vao)
         gl.glDrawArrays(gl.GL_TRIANGLES, 0, 6)
@@ -350,10 +445,16 @@ def main() -> int:
                 bar = "#" * (pct // 5) + "." * (20 - pct // 5)
                 sys.stdout.write(f"\rcalibrating [{bar}] {pct:3d}%   ")
             else:
-                conn = "connected" if connected else "disconnected"
+                conn = "tr-conn" if connected else "tr-down"
+                vid_part = ""
+                if video_stream is not None:
+                    fc = video_stream.frame_count
+                    sw, sh = video_stream.source_size
+                    vid_part = f"  vid {sw}x{sh}->{video_tex_size[0]}x{video_tex_size[1]} fr#{fc}"
+                proj_name = ["test", "fish", "equi"][proj_mode]
                 sys.stdout.write(
-                    f"\r{conn}  yaw {yaw:+7.2f}  pitch {pitch:+7.2f}  roll {roll:+7.2f}  "
-                    f"fov {fov_y_deg:4.1f}  fps {clock.get_fps():4.1f}   "
+                    f"\r{conn}  yaw{yaw:+6.1f} pit{pitch:+6.1f} rol{roll:+6.1f}"
+                    f"  fov{fov_y_deg:4.1f} mode={proj_name}{vid_part}  fps{clock.get_fps():4.1f} "
                 )
             sys.stdout.flush()
             last_status_print = now
@@ -361,6 +462,8 @@ def main() -> int:
         clock.tick(120)
 
     print()
+    if video_stream is not None:
+        video_stream.stop()
     if pose_stream is not None:
         pose_stream.stop()
     pygame.quit()

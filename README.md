@@ -111,13 +111,18 @@ xreal_one/
   __init__.py
 ```
 
-## Phase 1 viewer (test-card + head tracking)
+## Viewer
 
-The viewer renders a procedural head-tracked "colored sphere" with a
-yaw/pitch grid into a side-by-side framebuffer at the glasses' native
-Full-SBS resolution. No video file needed yet — this validates the
-fullscreen routing, OpenGL pipeline, and tracker thread all work
-together before Phase 2 adds the VR180 video unwarp.
+Side-by-side OpenGL viewer that pulls live pose from the glasses'
+TCP IMU stream and renders one of three modes per eye:
+
+* **testcard** — procedural head-tracked colored sphere with a
+  yaw/pitch grid. No video needed; validates the GL + tracker pipeline.
+* **fisheye** — VR180 equiangular fisheye reverse-projection from a
+  side-by-side video texture (the typical YouTube VR180 / Insta360 /
+  Canon RF 5.2mm dual-fisheye layout).
+* **equirect** — VR180 equirectangular reverse-projection (180° wide
+  × 180° tall, two halves SBS).
 
 ```bash
 pip install -r requirements.txt
@@ -125,18 +130,25 @@ pip install -r requirements.txt
 # 1. Switch the glasses to Full SBS (manual, via the glasses' button).
 # 2. Confirm in System Settings -> Displays that it shows up as 3840x1080.
 # 3. Run the viewer with sudo (until macOS Local Network permission is
-#    granted — see the section above):
+#    granted — see the section above).
+
+# Phase 1: test card only, no video file needed.
 sudo python3 viewer.py
+
+# Phase 2: with a VR180 video file.
+sudo python3 viewer.py /path/to/vr180_test.mp4
 ```
 
-If `viewer.py` can't auto-pick the glasses display, list them with
-`--display ?` style enumeration in the startup output and pick one
-manually:
+The decoder downsamples to 3840x1920 (per-eye 1920x1920) by default to
+keep texture-upload bandwidth manageable; tune with `--decode-width`
+and `--decode-height` if you want sharper or faster.
 
 ```bash
-sudo python3 viewer.py --display 1
-sudo python3 viewer.py --windowed         # debug in a 1920x540 window
-sudo python3 viewer.py --no-tracker       # GL-only, no glasses connection
+sudo python3 viewer.py video.mp4 --display 1            # explicit display
+sudo python3 viewer.py video.mp4 --windowed             # debug 1920x540
+sudo python3 viewer.py video.mp4 --proj equirect        # start in equirect mode
+sudo python3 viewer.py video.mp4 --fisheye-fov 200      # tune lens FOV
+sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 ```
 
 ### Controls
@@ -146,7 +158,7 @@ sudo python3 viewer.py --no-tracker       # GL-only, no glasses connection
 | F   | toggle fullscreen |
 | T   | zero view (current heading = forward) |
 | R   | recalibrate gyro (keep glasses still!) |
-| M   | cycle projection mode (testcard / fisheye stub / equirect stub) |
+| M   | cycle projection mode (testcard / fisheye / equirect) |
 | ↑/↓ | adjust rendered FOV |
 | D   | toggle the green SBS-split debug line |
 | Q   | quit |

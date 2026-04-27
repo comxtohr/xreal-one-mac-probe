@@ -36,6 +36,13 @@ _STILL_THRESHOLD_RAD_S = 0.01      # ~0.57 deg/s
 _STILL_HOLD_SAMPLES = 200          # ~0.2 s of stillness before bias refines
 _STILL_BIAS_ALPHA = 2.0e-4
 
+# Motion gate during the initial calibration. If gyro magnitude exceeds this
+# threshold during the 500-sample collection, we treat the sample as
+# contaminated and reset the accumulator. This forces calibration to wait
+# for sustained stillness instead of finishing 0.5 s after start whether or
+# not the head is actually still.
+_CALIB_MOTION_THRESHOLD_RAD_S = 0.05   # ~2.9 deg/s
+
 
 @dataclass
 class Pose:
@@ -127,6 +134,24 @@ class HeadTracker:
         ax_t, ay_t, az_t = report.az, report.ay, report.ax
 
         if not self._calibrated:
+            # Motion gate: discard accumulated samples and restart counting
+            # if the glasses moved during the calibration window. Without
+            # this, a half-second of head motion right after launch bakes
+            # the motion into the gyro-bias estimate, which then causes
+            # systemic drift after calibration completes.
+            gmag2 = (
+                report.gx * report.gx +
+                report.gy * report.gy +
+                report.gz * report.gz
+            )
+            if gmag2 > _CALIB_MOTION_THRESHOLD_RAD_S * _CALIB_MOTION_THRESHOLD_RAD_S:
+                self._gyro_sum = [0.0, 0.0, 0.0]
+                self._calib_count = 0
+                self._last_ax_t = ax_t
+                self._last_ay_t = ay_t
+                self._last_az_t = az_t
+                return None
+
             self._gyro_sum[0] += report.gx
             self._gyro_sum[1] += report.gy
             self._gyro_sum[2] += report.gz

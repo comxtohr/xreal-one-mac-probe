@@ -78,16 +78,40 @@ mat3 rotY(float a) { float c=cos(a), s=sin(a); return mat3(c,0,-s, 0,1,0, s,0,c)
 mat3 rotX(float a) { float c=cos(a), s=sin(a); return mat3(1,0,0, 0,c,-s, 0,s,c); }
 mat3 rotZ(float a) { float c=cos(a), s=sin(a); return mat3(c,-s,0, s,c,0, 0,0,1); }
 
+// Returns true if `d` (unit vector) is within `radDeg` of `axis`.
+bool nearAxis(vec3 d, vec3 axis, float radDeg) {
+    return acos(clamp(dot(d, axis), -1.0, 1.0)) < radians(radDeg);
+}
+
 vec3 testCardColor(vec3 d) {
     float yaw   = degrees(atan(d.x, d.z));
     float pitch = degrees(asin(clamp(d.y, -1.0, 1.0)));
 
-    vec3 base = 0.5 + 0.5 * d;
+    // Soft direction-coded background so motion is always obvious.
+    vec3 base = 0.4 + 0.4 * d;
+
+    // 15-deg yaw/pitch grid (only on the forward hemisphere; the back is darker).
     float yaw_dist   = abs(mod(yaw   + 7.5, 15.0) - 7.5);
     float pitch_dist = abs(mod(pitch + 7.5, 15.0) - 7.5);
     float grid = smoothstep(0.6, 0.0, min(yaw_dist, pitch_dist));
-    base = mix(base, vec3(1.0), grid * 0.6);
-    if (abs(yaw) < 0.5 || abs(pitch) < 0.5) base = mix(base, vec3(1.0, 0.2, 0.2), 0.85);
+    base = mix(base, vec3(1.0), grid * 0.4);
+    if (d.z < 0.0) base *= 0.5;  // back hemisphere dimmer
+
+    // Six fixed-color cardinal markers (10-deg radius each).
+    //   world +Y up      RED
+    //   world -Y down    BLUE
+    //   world -X left    GREEN
+    //   world +X right   YELLOW
+    //   world +Z forward WHITE
+    //   world -Z behind  MAGENTA (so we can spot when something flipped 180)
+    if (nearAxis(d, vec3( 0,  1,  0), 10.0)) base = vec3(1.0, 0.1, 0.1);
+    if (nearAxis(d, vec3( 0, -1,  0), 10.0)) base = vec3(0.1, 0.3, 1.0);
+    if (nearAxis(d, vec3(-1,  0,  0), 10.0)) base = vec3(0.1, 1.0, 0.3);
+    if (nearAxis(d, vec3( 1,  0,  0), 10.0)) base = vec3(1.0, 1.0, 0.2);
+    if (nearAxis(d, vec3( 0,  0,  1),  6.0)) base = vec3(1.0);
+    if (nearAxis(d, vec3( 0,  0, -1),  6.0)) base = vec3(1.0, 0.2, 1.0);
+
+    // Forward crosshair (within 4 deg of +Z, thin lines).
     if (abs(yaw) < 4.0 && abs(pitch) < 4.0) {
         if (abs(yaw) < 0.4 || abs(pitch) < 0.4) base = vec3(1.0, 1.0, 0.2);
     }
@@ -270,9 +294,8 @@ def main() -> int:
                    help="physical FOV of the fisheye lens in degrees (default 180)")
     p.add_argument("--mute", action="store_true",
                    help="don't play audio (default plays via ffplay/afplay)")
-    p.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=270,
-                   help="rotate per-eye sampling by N degrees CCW (default 270; "
-                        "matches Bilibili VR180 convention. Use 0 for raw Insta360/Canon)")
+    p.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
+                   help="rotate per-eye sampling by N degrees CCW (default 0)")
     p.add_argument("--flip-y", action="store_true",
                    help="vertically flip the per-eye sampling")
     p.add_argument("--invert-pitch", action="store_true",

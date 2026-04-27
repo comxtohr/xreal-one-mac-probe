@@ -26,6 +26,16 @@ _DEFAULT_CALIBRATION_TARGET = 500
 _DEFAULT_ALPHA = 0.96
 _RAD_PER_SEC_TO_DEG_PER_SEC = 180.0 / math.pi
 
+# Stationary auto-bias-refinement (runs after the initial 500-sample
+# calibration). When the corrected gyro magnitude stays below the threshold
+# for `_STILL_HOLD_SAMPLES` consecutive samples, we treat the glasses as
+# motionless and slowly walk the residual bias toward whatever the gyro is
+# reading. With a 1 kHz IMU, alpha=2e-4 gives roughly 5-second time-constant
+# correction of small residual drift while leaving real motion unaffected.
+_STILL_THRESHOLD_RAD_S = 0.01      # ~0.57 deg/s
+_STILL_HOLD_SAMPLES = 200          # ~0.2 s of stillness before bias refines
+_STILL_BIAS_ALPHA = 2.0e-4
+
 
 @dataclass
 class Pose:
@@ -53,6 +63,8 @@ class HeadTracker:
 
         self._gyro_sum = [0.0, 0.0, 0.0]
         self._gyro_bias = [0.0, 0.0, 0.0]
+        self._residual_bias = [0.0, 0.0, 0.0]
+        self._still_count = 0
         self._calib_count = 0
         self._calibrated = False
 
@@ -79,6 +91,8 @@ class HeadTracker:
     def reset_calibration(self) -> None:
         self._gyro_sum = [0.0, 0.0, 0.0]
         self._gyro_bias = [0.0, 0.0, 0.0]
+        self._residual_bias = [0.0, 0.0, 0.0]
+        self._still_count = 0
         self._calib_count = 0
         self._calibrated = False
         self._pitch = self._yaw = self._roll = 0.0
@@ -128,9 +142,20 @@ class HeadTracker:
             return None
         dt = dt_ns / 1e9
 
-        gx = report.gx - self._gyro_bias[0]
-        gy = report.gy - self._gyro_bias[1]
-        gz = report.gz - self._gyro_bias[2]
+        gx = report.gx - self._gyro_bias[0] - self._residual_bias[0]
+        gy = report.gy - self._gyro_bias[1] - self._residual_bias[1]
+        gz = report.gz - self._gyro_bias[2] - self._residual_bias[2]
+
+        # Stationary auto-bias-refinement.
+        gmag2 = gx * gx + gy * gy + gz * gz
+        if gmag2 < _STILL_THRESHOLD_RAD_S * _STILL_THRESHOLD_RAD_S:
+            self._still_count += 1
+            if self._still_count >= _STILL_HOLD_SAMPLES:
+                self._residual_bias[0] += _STILL_BIAS_ALPHA * gx
+                self._residual_bias[1] += _STILL_BIAS_ALPHA * gy
+                self._residual_bias[2] += _STILL_BIAS_ALPHA * gz
+        else:
+            self._still_count = 0
 
         pitch_gyro = self._pitch + gx * _RAD_PER_SEC_TO_DEG_PER_SEC * dt
         yaw_gyro = self._yaw + gy * _RAD_PER_SEC_TO_DEG_PER_SEC * dt

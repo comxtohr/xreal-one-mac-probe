@@ -304,8 +304,9 @@ def main() -> int:
     p.add_argument("--no-invert-pitch", dest="invert_pitch", action="store_false")
     p.add_argument("--invert-yaw", action="store_true",
                    help="invert yaw sign")
-    p.add_argument("--invert-roll", action="store_true",
-                   help="invert roll sign")
+    p.add_argument("--invert-roll", action="store_true", default=True,
+                   help="invert roll sign (default true; matches the pitch convention)")
+    p.add_argument("--no-invert-roll", dest="invert_roll", action="store_false")
     args = p.parse_args()
 
     pygame.init()

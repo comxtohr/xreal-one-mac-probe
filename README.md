@@ -162,6 +162,9 @@ sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 | ↑/↓ | adjust rendered FOV |
 | V   | toggle vertical flip (use if the source content is upside-down) |
 | O   | cycle 0 / 90 / 180 / 270 deg per-eye rotation (source layout varies) |
+| P   | invert pitch sign (default already inverted; toggles back) |
+| Y   | invert yaw sign |
+| L   | invert roll sign |
 | D   | toggle the green SBS-split debug line |
 | Q   | quit |
 

@@ -267,6 +267,13 @@ def main() -> int:
                    help="rotate per-eye sampling by N degrees CCW (default 0)")
     p.add_argument("--flip-y", action="store_true",
                    help="vertically flip the per-eye sampling")
+    p.add_argument("--invert-pitch", action="store_true", default=True,
+                   help="invert pitch sign (default true; XREAL One pitch convention seems flipped)")
+    p.add_argument("--no-invert-pitch", dest="invert_pitch", action="store_false")
+    p.add_argument("--invert-yaw", action="store_true",
+                   help="invert yaw sign")
+    p.add_argument("--invert-roll", action="store_true",
+                   help="invert roll sign")
     args = p.parse_args()
 
     pygame.init()
@@ -359,6 +366,9 @@ def main() -> int:
     show_debug = True
     flip_y = args.flip_y
     rot90 = (args.rotate // 90) % 4
+    invert_pitch = args.invert_pitch
+    invert_yaw = args.invert_yaw
+    invert_roll = args.invert_roll
     is_fullscreen = not args.windowed
 
     clock = pygame.time.Clock()
@@ -389,6 +399,15 @@ def main() -> int:
                 elif event.key == pygame.K_o:
                     rot90 = (rot90 + 1) % 4
                     print(f"\n[rotate = {rot90 * 90} deg]")
+                elif event.key == pygame.K_p:
+                    invert_pitch = not invert_pitch
+                    print(f"\n[invert_pitch = {invert_pitch}]")
+                elif event.key == pygame.K_y:
+                    invert_yaw = not invert_yaw
+                    print(f"\n[invert_yaw = {invert_yaw}]")
+                elif event.key == pygame.K_l:
+                    invert_roll = not invert_roll
+                    print(f"\n[invert_roll = {invert_roll}]")
                 elif event.key == pygame.K_UP:
                     fov_y_deg = min(120.0, fov_y_deg + 2.0)
                     print(f"\n[fov_y = {fov_y_deg:.1f}]")
@@ -454,6 +473,10 @@ def main() -> int:
             calib = 1.0
             calibrated = True
             connected = False
+
+        if invert_yaw:   yaw = -yaw
+        if invert_pitch: pitch = -pitch
+        if invert_roll:  roll = -roll
 
         gl.glUniform1f(u_viewport_width, float(w))
         gl.glUniform1f(u_yaw, yaw)

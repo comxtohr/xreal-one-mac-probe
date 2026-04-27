@@ -320,6 +320,9 @@ def main() -> int:
                    help="run in a 1920x540 window instead of fullscreen")
     p.add_argument("--no-tracker", action="store_true",
                    help="don't connect to glasses; render with zero pose")
+    p.add_argument("--no-mag", action="store_true",
+                   help="disable magnetometer-based yaw correction "
+                        "(useful if your environment has strong magnetic interference)")
     p.add_argument("--fov", type=float, default=87.0,
                    help="initial diagonal field of view in degrees (default 87). "
                         "57 = XREAL One Pro 1:1 angular mapping (subjects feel "
@@ -436,7 +439,7 @@ def main() -> int:
     # Tracker
     pose_stream: Optional[PoseStream] = None
     if not args.no_tracker:
-        pose_stream = PoseStream()
+        pose_stream = PoseStream(use_mag=not args.no_mag)
         pose_stream.start()
 
     fov_diag_deg = args.fov

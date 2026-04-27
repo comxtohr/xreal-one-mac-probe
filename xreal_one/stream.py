@@ -19,6 +19,7 @@ from .protocol import (
     DEFAULT_HOST,
     DEFAULT_STREAM_PORT,
     ImuReport,
+    MagReport,
     StreamFramer,
 )
 from .tracker import HeadTracker, Pose
@@ -63,10 +64,12 @@ class PoseStream:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_STREAM_PORT,
         reconnect_delay: float = 1.0,
+        use_mag: bool = True,
     ) -> None:
         self.host = host
         self.port = port
         self.reconnect_delay = reconnect_delay
+        self.use_mag = use_mag
 
         self._lock = threading.Lock()
         self._abs = Pose(0.0, 0.0, 0.0)
@@ -126,7 +129,7 @@ class PoseStream:
 
     def _run_loop(self) -> None:
         framer = StreamFramer()
-        tracker = HeadTracker()
+        tracker = HeadTracker(mag_alpha=(1e-3 if self.use_mag else 0.0))
         src = _pick_source_for(self.host)
 
         while self._running:
@@ -153,6 +156,9 @@ class PoseStream:
                     if not chunk:
                         break
                     for report in framer.append(chunk):
+                        if isinstance(report, MagReport):
+                            tracker.feed_mag(report.mx, report.my, report.mz)
+                            continue
                         if isinstance(report, ImuReport):
                             with self._lock:
                                 if self._zero_pending and tracker.is_calibrated:

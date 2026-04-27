@@ -43,6 +43,15 @@ _STILL_BIAS_ALPHA = 1.0e-3         # ~1 s time-constant correction
 # not the head is actually still.
 _CALIB_MOTION_THRESHOLD_RAD_S = 0.05   # ~2.9 deg/s
 
+# Magnetometer-based yaw correction. After yaw is integrated each sample,
+# we tilt-compensate the latest mag reading using the current pitch/roll
+# to get a horizontal magnetic vector, derive a heading from it, and pull
+# integrated yaw a tiny fraction toward that heading every sample.
+# Offset (hard-iron) calibration is skipped: a constant mag offset only
+# biases absolute heading, which we don't care about — yaw is recentered
+# via T anyway. Relative yaw changes with rotation are still preserved.
+_MAG_ALPHA = 1.0e-3                    # ~1 s time constant @ 1 kHz IMU
+
 
 @dataclass
 class Pose:
@@ -64,9 +73,11 @@ class HeadTracker:
         self,
         calibration_samples: int = _DEFAULT_CALIBRATION_TARGET,
         complementary_alpha: float = _DEFAULT_ALPHA,
+        mag_alpha: float = _MAG_ALPHA,
     ) -> None:
         self.calibration_target = calibration_samples
         self.alpha = complementary_alpha
+        self.mag_alpha = mag_alpha
 
         self._gyro_sum = [0.0, 0.0, 0.0]
         self._gyro_bias = [0.0, 0.0, 0.0]
@@ -92,6 +103,13 @@ class HeadTracker:
 
         self._last_ts_ns: Optional[int] = None
 
+        # Latest magnetometer sample (in IMU body frame, no remap applied
+        # yet — that happens inside _apply_mag_yaw_correction).
+        self._latest_mx: float = 0.0
+        self._latest_my: float = 0.0
+        self._latest_mz: float = 0.0
+        self._mag_seen: bool = False
+
     @property
     def is_calibrated(self) -> bool:
         return self._calibrated
@@ -101,6 +119,57 @@ class HeadTracker:
         if self.calibration_target <= 0:
             return 1.0
         return min(1.0, self._calib_count / self.calibration_target)
+
+    def feed_mag(self, mx: float, my: float, mz: float) -> None:
+        """Feed a magnetometer sample. Asynchronous w.r.t. IMU samples — we
+        just cache the latest reading and consume it on each IMU update."""
+        self._latest_mx = mx
+        self._latest_my = my
+        self._latest_mz = mz
+        self._mag_seen = True
+
+    def _apply_mag_yaw_correction(self) -> None:
+        """Pull integrated yaw toward the tilt-compensated magnetic heading.
+
+        Uses the same tracker-frame remap as the accelerometer: raw mag axes
+        (x, y, z) -> (z, y, x). If the mag axis convention turns out to be
+        different from accel, the user can disable this with --no-mag and
+        revert to gyro-only yaw.
+        """
+        if self.mag_alpha <= 0.0:
+            return
+
+        mx_t = self._latest_mz
+        my_t = self._latest_my
+        mz_t = self._latest_mx
+
+        norm = math.sqrt(mx_t * mx_t + my_t * my_t + mz_t * mz_t)
+        if norm < 1e-6:
+            return
+        mx_t /= norm
+        my_t /= norm
+        mz_t /= norm
+
+        pitch_rad = math.radians(self._pitch)
+        roll_rad = math.radians(self._roll)
+        cp, sp = math.cos(pitch_rad), math.sin(pitch_rad)
+        cr, sr = math.cos(roll_rad), math.sin(roll_rad)
+
+        # Rotate the body-frame mag into a horizontal frame using pitch/roll
+        # so we can take a 2-D heading on the horizontal projection.
+        mag_x_h = mx_t * cp + my_t * sr * sp + mz_t * cr * sp
+        mag_y_h = my_t * cr - mz_t * sr
+
+        mag_heading = math.degrees(math.atan2(-mag_y_h, mag_x_h))
+
+        # Circular distance between integrated yaw and mag heading, then
+        # nudge yaw toward the heading.
+        diff = mag_heading - self._yaw
+        while diff > 180.0:
+            diff -= 360.0
+        while diff < -180.0:
+            diff += 360.0
+        self._yaw = _wrap(self._yaw + self.mag_alpha * diff)
 
     def reset_calibration(self) -> None:
         self._gyro_sum = [0.0, 0.0, 0.0]
@@ -112,6 +181,8 @@ class HeadTracker:
         self._pitch = self._yaw = self._roll = 0.0
         self._zero_pitch = self._zero_yaw = self._zero_roll = 0.0
         self._last_ts_ns = None
+        self._mag_seen = False
+        self._latest_mx = self._latest_my = self._latest_mz = 0.0
 
     def zero_view(self) -> None:
         self._zero_pitch = self._pitch
@@ -246,5 +317,8 @@ class HeadTracker:
         self._yaw = _wrap(self._yaw)
         self._roll = _wrap(self._roll)
         self._last_ts_ns = report.hmd_time_nanos
+
+        if self._mag_seen:
+            self._apply_mag_yaw_correction()
 
         return self.absolute()

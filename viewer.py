@@ -94,19 +94,22 @@ vec3 testCardColor(vec3 d) {
     return base;
 }
 
-vec2 rotateAroundCenter(vec2 uv, int rot) {
-    vec2 c = uv - 0.5;
-    if (rot == 1)      c = vec2( c.y, -c.x);   // 90 CCW (display rotates CW)
-    else if (rot == 2) c = -c;                 // 180
-    else if (rot == 3) c = vec2(-c.y,  c.x);   // 270 CCW (display rotates CCW)
-    return c + 0.5;
+// Rotate the lookup direction around the +Z (forward) axis. This corrects
+// for sources whose lens frame ("up" in image) is rotated relative to world
+// up — typical in re-encoded uploads. Doing the rotation in direction space
+// keeps yaw/pitch/roll mapped to their true world axes; doing it in UV
+// space (the previous approach) would swap the perceived yaw and pitch.
+vec3 rotateAroundForward(vec3 d, int rot) {
+    if (rot == 1) return vec3(-d.y,  d.x, d.z);  // 90 CCW
+    if (rot == 2) return vec3(-d.x, -d.y, d.z);  // 180
+    if (rot == 3) return vec3( d.y, -d.x, d.z);  // 270 CCW = 90 CW
+    return d;
 }
 
 // Sample SBS video texture at per-eye UV in [0,1]^2 (image-space, top-left
 // origin: y=0 means top of source frame). Source layout: left-eye in left
 // half (u in [0,0.5]), right-eye in right half.
 vec3 sampleSbs(vec2 uvEye, bool isLeftEye) {
-    uvEye = rotateAroundCenter(uvEye, uRot90);
     if (uvEye.x < 0.0 || uvEye.x > 1.0 || uvEye.y < 0.0 || uvEye.y > 1.0) {
         return vec3(0.0);
     }
@@ -158,16 +161,20 @@ void main() {
     mat3 R = rotY(yaw) * rotX(pitch) * rotZ(roll);
     vec3 d = R * dir;
 
+    // Bring the lookup direction into the source frame's lens orientation.
+    // Test card uses raw d (world frame); video sampling uses lens-frame d.
+    vec3 dLens = rotateAroundForward(d, uRot90);
+
     vec3 col;
     if (uProjMode == 0 || uHasVideo == 0) {
         col = testCardColor(d);
     } else if (uProjMode == 1) {
         bool outside;
-        vec2 uvImg = fisheyeUv(d, outside);
+        vec2 uvImg = fisheyeUv(dLens, outside);
         col = outside ? vec3(0.05) : sampleSbs(uvImg, isLeftEye);
     } else {
         bool outside;
-        vec2 uvImg = equirectUv(d, outside);
+        vec2 uvImg = equirectUv(dLens, outside);
         col = outside ? vec3(0.05) : sampleSbs(uvImg, isLeftEye);
     }
 

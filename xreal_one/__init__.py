@@ -10,6 +10,7 @@ from .protocol import (
     ParseStats,
 )
 from .tracker import HeadTracker, Pose
+from .stream import PoseStream, PoseSnapshot
 
 __all__ = [
     "DEFAULT_HOST",
@@ -23,4 +24,6 @@ __all__ = [
     "ParseStats",
     "HeadTracker",
     "Pose",
+    "PoseStream",
+    "PoseSnapshot",
 ]

@@ -101,13 +101,55 @@ with the `dump` output.
 ## Files
 
 ```
-probe.py              # CLI entry point (stdlib only)
+probe.py              # diagnostic CLI: dump / imu / pose (stdlib only)
+viewer.py             # Phase 1 viewer: GL test card + head tracking (deps below)
 test_protocol.py      # offline self-test on synthetic frames
 xreal_one/
   protocol.py         # frame parser, dual-magic, IMU/MAG decode
   tracker.py          # gyro calibration + complementary filter
+  stream.py           # threaded pose source (used by viewer.py)
   __init__.py
 ```
+
+## Phase 1 viewer (test-card + head tracking)
+
+The viewer renders a procedural head-tracked "colored sphere" with a
+yaw/pitch grid into a side-by-side framebuffer at the glasses' native
+Full-SBS resolution. No video file needed yet — this validates the
+fullscreen routing, OpenGL pipeline, and tracker thread all work
+together before Phase 2 adds the VR180 video unwarp.
+
+```bash
+pip install -r requirements.txt
+
+# 1. Switch the glasses to Full SBS (manual, via the glasses' button).
+# 2. Confirm in System Settings -> Displays that it shows up as 3840x1080.
+# 3. Run the viewer with sudo (until macOS Local Network permission is
+#    granted — see the section above):
+sudo python3 viewer.py
+```
+
+If `viewer.py` can't auto-pick the glasses display, list them with
+`--display ?` style enumeration in the startup output and pick one
+manually:
+
+```bash
+sudo python3 viewer.py --display 1
+sudo python3 viewer.py --windowed         # debug in a 1920x540 window
+sudo python3 viewer.py --no-tracker       # GL-only, no glasses connection
+```
+
+### Controls
+
+| key | action |
+|-----|--------|
+| F   | toggle fullscreen |
+| T   | zero view (current heading = forward) |
+| R   | recalibrate gyro (keep glasses still!) |
+| M   | cycle projection mode (testcard / fisheye stub / equirect stub) |
+| ↑/↓ | adjust rendered FOV |
+| D   | toggle the green SBS-split debug line |
+| Q   | quit |
 
 ## Provenance
 

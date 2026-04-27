@@ -1,2 +1,5 @@
-# probe.py uses only the Python standard library.
-# requirements file kept intentionally empty so `pip install -r requirements.txt` is a no-op.
+# Phase 1 (test-card + head tracking) dependencies.
+# Phase 2 will add `av` for video decoding.
+pygame>=2.5
+PyOpenGL>=3.1.6
+numpy>=1.24

@@ -20,8 +20,10 @@ auto-routes that link-local address through the corresponding
 from __future__ import annotations
 
 import argparse
+import re
 import select
 import socket
+import subprocess
 import sys
 import time
 from typing import List, Optional
@@ -37,12 +39,62 @@ from xreal_one import (
 )
 
 
+_IFCONFIG_INET_RE = re.compile(r"inet\s+(169\.254\.\d+\.\d+)")
+
+
+def _list_local_link_local_ips() -> List[str]:
+    """Best-effort enumeration of local IPv4 link-local addresses.
+
+    On macOS XREAL One Pro shows up as one or two ethernet interfaces with
+    169.254.x.y addresses. With multiple interfaces the kernel's default
+    source-address selection sometimes picks the wrong one for a TCP
+    connect, so we want to bind explicitly to the matching subnet.
+    """
+    try:
+        out = subprocess.run(
+            ["ifconfig"], capture_output=True, text=True, timeout=2
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    return _IFCONFIG_INET_RE.findall(out)
+
+
+def _pick_source_for(host: str) -> Optional[str]:
+    """Pick a local IP in the same /24 as `host`, if any."""
+    parts = host.split(".")
+    if len(parts) != 4:
+        return None
+    target_prefix = ".".join(parts[:3]) + "."
+    for ip in _list_local_link_local_ips():
+        if ip.startswith(target_prefix):
+            return ip
+    return None
+
+
 def _connect(host: str, port: int, timeout: float = 2.0) -> socket.socket:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    sock.connect((host, port))
-    sock.settimeout(0.5)
-    return sock
+    src = _pick_source_for(host)
+
+    def _try(bind_ip: Optional[str]) -> socket.socket:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        if bind_ip is not None:
+            s.bind((bind_ip, 0))
+        s.connect((host, port))
+        s.settimeout(0.5)
+        return s
+
+    if src is not None:
+        try:
+            sock = _try(src)
+            print(f"connected via source {src} -> {host}:{port}", flush=True)
+            return sock
+        except OSError as e:
+            print(
+                f"bound connect via {src} failed ({e}); retrying without bind",
+                flush=True,
+            )
+
+    return _try(None)
 
 
 def _read_chunk(sock: socket.socket) -> bytes:

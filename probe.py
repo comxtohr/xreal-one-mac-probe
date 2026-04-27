@@ -71,10 +71,22 @@ def _pick_source_for(host: str) -> Optional[str]:
     return None
 
 
-def _connect(host: str, port: int, timeout: float = 2.0) -> socket.socket:
+def _connect(
+    host: str,
+    port: int,
+    timeout: float = 2.0,
+    attempts: int = 5,
+    retry_delay: float = 1.0,
+) -> socket.socket:
+    """Connect with retry + optional source-IP bind.
+
+    macOS sometimes returns EHOSTUNREACH on the first connect when the
+    XREAL stream server hasn't fully released a prior client session.
+    Retrying with a short delay almost always works.
+    """
     src = _pick_source_for(host)
 
-    def _try(bind_ip: Optional[str]) -> socket.socket:
+    def _attempt(bind_ip: Optional[str]) -> socket.socket:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         if bind_ip is not None:
@@ -83,18 +95,26 @@ def _connect(host: str, port: int, timeout: float = 2.0) -> socket.socket:
         s.settimeout(0.5)
         return s
 
-    if src is not None:
-        try:
-            sock = _try(src)
-            print(f"connected via source {src} -> {host}:{port}", flush=True)
-            return sock
-        except OSError as e:
-            print(
-                f"bound connect via {src} failed ({e}); retrying without bind",
-                flush=True,
-            )
-
-    return _try(None)
+    last_err: Optional[BaseException] = None
+    for i in range(1, attempts + 1):
+        for bind_ip in ([src, None] if src else [None]):
+            try:
+                sock = _attempt(bind_ip)
+                tag = f"src={bind_ip}" if bind_ip else "src=auto"
+                print(f"connected ({tag}, try {i}/{attempts}) -> {host}:{port}", flush=True)
+                return sock
+            except OSError as e:
+                last_err = e
+                if i == 1:
+                    bind_label = bind_ip or "auto"
+                    print(
+                        f"  try {i} bind={bind_label}: {e.__class__.__name__} errno={e.errno} ({e.strerror})",
+                        flush=True,
+                    )
+        if i < attempts:
+            time.sleep(retry_delay)
+    assert last_err is not None
+    raise last_err
 
 
 def _read_chunk(sock: socket.socket) -> bytes:

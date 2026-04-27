@@ -139,9 +139,9 @@ sudo python3 viewer.py
 sudo python3 viewer.py /path/to/vr180_test.mp4
 ```
 
-The decoder downsamples to 3840x1920 (per-eye 1920x1920) by default to
-keep texture-upload bandwidth manageable; tune with `--decode-width`
-and `--decode-height` if you want sharper or faster.
+The decoder uploads each frame at its native source resolution by
+default. Pass `--decode-width N --decode-height M` to downscale during
+decode (e.g. for older hardware or slower machines).
 
 ```bash
 sudo python3 viewer.py video.mp4 --display 1            # explicit display

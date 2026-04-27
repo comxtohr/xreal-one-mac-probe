@@ -305,14 +305,10 @@ def main() -> int:
     p.add_argument("--proj", choices=["testcard", "fisheye", "equirect"],
                    default=None,
                    help="initial projection mode (default: fisheye if video given, else testcard)")
-    p.add_argument("--decode-width", type=int, default=3840,
-                   help="downscale decoded frames to this width (default 3840)")
-    p.add_argument("--decode-height", type=int, default=1920,
-                   help="downscale decoded frames to this height (default 1920)")
-    p.add_argument("--native", action="store_true",
-                   help="skip in-decoder downscale; upload frames at the source's "
-                        "native resolution (e.g. 7680x3840 for 8K). Requires enough "
-                        "memory bandwidth on the host.")
+    p.add_argument("--decode-width", type=int, default=None,
+                   help="downscale decoded frames to this width (default: source width)")
+    p.add_argument("--decode-height", type=int, default=None,
+                   help="downscale decoded frames to this height (default: source height)")
     p.add_argument("--fisheye-fov", type=float, default=180.0,
                    help="physical FOV of the fisheye lens in degrees (default 180)")
     p.add_argument("--mute", action="store_true",
@@ -387,8 +383,8 @@ def main() -> int:
         from xreal_one.video import VideoStream  # lazy: avoids importing av in --no-video runs
         video_stream = VideoStream(
             args.video,
-            target_width=None if args.native else args.decode_width,
-            target_height=None if args.native else args.decode_height,
+            target_width=args.decode_width,
+            target_height=args.decode_height,
             loop=True,
         )
         video_stream.start()

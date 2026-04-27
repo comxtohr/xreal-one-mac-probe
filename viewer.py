@@ -263,8 +263,9 @@ def main() -> int:
                    help="physical FOV of the fisheye lens in degrees (default 180)")
     p.add_argument("--mute", action="store_true",
                    help="don't play audio (default plays via ffplay/afplay)")
-    p.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
-                   help="rotate per-eye sampling by N degrees CCW (default 0)")
+    p.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=270,
+                   help="rotate per-eye sampling by N degrees CCW (default 270; "
+                        "matches Bilibili VR180 convention. Use 0 for raw Insta360/Canon)")
     p.add_argument("--flip-y", action="store_true",
                    help="vertically flip the per-eye sampling")
     p.add_argument("--invert-pitch", action="store_true", default=True,

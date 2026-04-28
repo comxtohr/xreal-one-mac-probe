@@ -96,13 +96,16 @@ class PoseStream:
 
     def stop(self) -> None:
         self._running = False
-        if self._sock is not None:
+        # Capture the socket reference locally - the worker thread can null
+        # self._sock out from under us at any time in its finally block.
+        sock = self._sock
+        if sock is not None:
             try:
-                self._sock.shutdown(socket.SHUT_RDWR)
+                sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
             try:
-                self._sock.close()
+                sock.close()
             except OSError:
                 pass
         if self._thread is not None:

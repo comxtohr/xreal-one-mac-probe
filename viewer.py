@@ -81,6 +81,9 @@ uniform sampler2D uHud;          // RGB texture, dark bg + bright text
 uniform float uUiDisparity;      // per-eye horizontal shift for UI; brings
                                  // overlays in from "infinity" to a fusable
                                  // virtual depth. 0 = infinity, ~0.015 ≈ 5 m.
+uniform float uVideoDisparity;   // per-eye horizontal shift on the video
+                                 // sample point. Tweaks perceived stereo
+                                 // depth of the scene; 0 = source default.
 
 const float PI = 3.14159265359;
 
@@ -148,8 +151,10 @@ vec3 sampleSbs(vec2 uvEye, bool isLeftEye) {
         return vec3(0.0);
     }
     float uOffset = isLeftEye ? 0.0 : 0.5;
+    float vdisp = isLeftEye ? uVideoDisparity : -uVideoDisparity;
     float v = (uFlipY == 1) ? (1.0 - uvEye.y) : uvEye.y;
-    return texture(uVideo, vec2(uvEye.x * 0.5 + uOffset, v)).rgb;
+    float u = clamp(uvEye.x * 0.5 + uOffset + vdisp, 0.0, 1.0);
+    return texture(uVideo, vec2(u, v)).rgb;
 }
 
 // Top-bottom (over/under) SBS sampling: top half is left eye, bottom right.
@@ -159,7 +164,9 @@ vec3 sampleFlatTb(vec2 uvEye, bool isLeftEye) {
     }
     float v = isLeftEye ? (uvEye.y * 0.5) : (uvEye.y * 0.5 + 0.5);
     if (uFlipY == 1) v = 1.0 - v;
-    return texture(uVideo, vec2(uvEye.x, v)).rgb;
+    float vdisp = isLeftEye ? uVideoDisparity : -uVideoDisparity;
+    float u = clamp(uvEye.x + vdisp, 0.0, 1.0);
+    return texture(uVideo, vec2(u, v)).rgb;
 }
 
 // VR180 equiangular fisheye reverse-projection.
@@ -405,8 +412,13 @@ def main() -> int:
     p.add_argument("--ui-depth", type=float, default=0.015,
                    help="per-eye horizontal shift for UI overlays. 0 = "
                         "rendered at infinity (doubled in glasses); ~0.015 ≈ "
-                        "5 m perceived depth (default, fusable). Higher pulls "
-                        "UI closer; lower pushes it farther.")
+                        "5 m perceived depth (default, fusable). Adjustable "
+                        "live with [ and ].")
+    p.add_argument("--video-disparity", type=float, default=0.0,
+                   help="extra per-eye horizontal shift on the video sample. "
+                        "Tweaks perceived stereo depth of the scene; 0 leaves "
+                        "the source's native disparity. Adjustable live with "
+                        ", and . (positive pulls scene closer).")
     p.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
                    help="rotate per-eye sampling by N degrees CCW (default 0)")
     p.add_argument("--flip-y", action="store_true",
@@ -481,6 +493,7 @@ def main() -> int:
     u_hudrect = gl.glGetUniformLocation(program, "uHudRect")
     u_hud     = gl.glGetUniformLocation(program, "uHud")
     u_ui_disp = gl.glGetUniformLocation(program, "uUiDisparity")
+    u_vid_disp = gl.glGetUniformLocation(program, "uVideoDisparity")
 
     # Video setup
     video_stream = None
@@ -603,6 +616,8 @@ def main() -> int:
     invert_pitch = args.invert_pitch
     invert_yaw = args.invert_yaw
     invert_roll = args.invert_roll
+    ui_depth = args.ui_depth
+    video_disparity = args.video_disparity
     is_fullscreen = not windowed
 
     clock = pygame.time.Clock()
@@ -675,6 +690,18 @@ def main() -> int:
                 elif event.key == pygame.K_0:
                     fov_diag_deg = args.fov
                     _show_hud(f"FOV {fov_diag_deg:.0f}°")
+                elif event.key == pygame.K_LEFTBRACKET:
+                    ui_depth = max(0.0, ui_depth - 0.003)
+                    _show_hud(f"UI depth {ui_depth:.3f}")
+                elif event.key == pygame.K_RIGHTBRACKET:
+                    ui_depth = min(0.05, ui_depth + 0.003)
+                    _show_hud(f"UI depth {ui_depth:.3f}")
+                elif event.key == pygame.K_COMMA:
+                    video_disparity = max(-0.05, video_disparity - 0.003)
+                    _show_hud(f"3D shift {video_disparity:+.3f}")
+                elif event.key == pygame.K_PERIOD:
+                    video_disparity = min(0.05, video_disparity + 0.003)
+                    _show_hud(f"3D shift {video_disparity:+.3f}")
                 elif event.key == pygame.K_f:
                     is_fullscreen = not is_fullscreen
                     new_flags = pygame.OPENGL | pygame.DOUBLEBUF | (
@@ -697,7 +724,7 @@ def main() -> int:
                 eye_uv_y = (h_now - my) / max(1.0, h_now)
                 # Apply the same disparity offset the shader uses, so a click
                 # aimed at the displayed bar lands inside the rect bounds.
-                ui_uv_x = eye_uv_x - (args.ui_depth if clicked_left_eye else -args.ui_depth)
+                ui_uv_x = eye_uv_x - (ui_depth if clicked_left_eye else -ui_depth)
                 if (PB_BAR_X0 < ui_uv_x < PB_BAR_X1 and
                         PB_HIT_Y0 < eye_uv_y < PB_HIT_Y1 and
                         video_stream.duration_seconds > 0):
@@ -787,7 +814,8 @@ def main() -> int:
         gl.glUniform1f(u_pbprog, pb_progress)
         gl.glUniform1i(u_pbpaus, 1 if (video_stream is not None and video_stream.is_paused) else 0)
         gl.glUniform1f(u_pbspd, video_stream.speed if video_stream is not None else 1.0)
-        gl.glUniform1f(u_ui_disp, args.ui_depth)
+        gl.glUniform1f(u_ui_disp, ui_depth)
+        gl.glUniform1f(u_vid_disp, video_disparity)
 
         # HUD: position centered horizontally near the top of each eye, with
         # the rect sized so the texture renders at its native pixel aspect

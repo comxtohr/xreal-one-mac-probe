@@ -170,6 +170,8 @@ sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 | M   | cycle projection mode (testcard / fisheye / equirect) |
 | ↑/↓ | zoom in / out (decrease / increase rendered FOV) |
 | 0   | reset FOV to the value passed via --fov (default 50) |
+| [/] | move UI overlays farther / closer in stereo depth |
+| ,/. | shift video stereo disparity (closer / farther) |
 | V   | toggle vertical flip (use if the source content is upside-down) |
 | O   | cycle 0 / 90 / 180 / 270 deg per-eye rotation (source layout varies) |
 | P   | invert pitch sign (default already inverted; toggles back) |

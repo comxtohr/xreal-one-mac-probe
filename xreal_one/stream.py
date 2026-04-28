@@ -46,6 +46,35 @@ def _pick_source_for(host: str) -> Optional[str]:
     return None
 
 
+def is_reachable(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_STREAM_PORT,
+    timeout: float = 1.0,
+) -> bool:
+    """Quick TCP probe so the viewer can decide upfront whether the glasses
+    are plugged in. Mirrors the source-IP bind that PoseStream does at
+    runtime (matching link-local /24) so a positive result here means the
+    real connection will likely succeed too."""
+    src = _pick_source_for(host)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        if src is not None:
+            try:
+                sock.bind((src, 0))
+            except OSError:
+                pass
+        sock.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 @dataclass(frozen=True)
 class PoseSnapshot:
     absolute: Pose

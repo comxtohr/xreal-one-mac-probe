@@ -41,7 +41,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame  # noqa: E402
 from OpenGL import GL as gl  # noqa: E402
 
-from xreal_one.stream import PoseStream  # noqa: E402
+from xreal_one.stream import PoseStream, is_reachable  # noqa: E402
 
 VERTEX_SRC = """\
 #version 330 core
@@ -417,7 +417,18 @@ def main() -> int:
     pygame.display.gl_set_attribute(pygame.GL_DOUBLEBUFFER, 1)
 
     display_idx, native_size = _pick_display(args.display)
-    if args.windowed:
+
+    # If neither glasses display (>=3000 wide) nor an explicit --display is
+    # present, auto-fall-back to a small window. Going fullscreen on the
+    # user's normal Mac display when they're just running without glasses
+    # would steal the whole screen.
+    no_xreal_display = native_size[0] < 3000 and args.display is None
+    windowed = args.windowed or no_xreal_display
+    if no_xreal_display and not args.windowed:
+        print("no XREAL display detected; running windowed. "
+              "Pass --display N to override.")
+
+    if windowed:
         size = (1920, 540)
         flags = pygame.OPENGL | pygame.DOUBLEBUF
     else:
@@ -546,9 +557,17 @@ def main() -> int:
 
     # Tracker
     pose_stream: Optional[PoseStream] = None
+    tracker_pending_message: Optional[str] = None
     if not args.no_tracker:
-        pose_stream = PoseStream(use_mag=not args.no_mag)
-        pose_stream.start()
+        if is_reachable(timeout=1.0):
+            pose_stream = PoseStream(use_mag=not args.no_mag)
+            pose_stream.start()
+            print("XREAL IMU stream reachable; head tracking enabled.")
+        else:
+            print("XREAL IMU stream not reachable; running without head tracking.")
+            print("  (plug in glasses + grant Local Network permission, "
+                  "then rerun for VR mode.)")
+            tracker_pending_message = "No glasses"
 
     fov_diag_deg = args.fov
     if args.proj is not None:
@@ -564,11 +583,15 @@ def main() -> int:
     invert_pitch = args.invert_pitch
     invert_yaw = args.invert_yaw
     invert_roll = args.invert_roll
-    is_fullscreen = not args.windowed
+    is_fullscreen = not windowed
 
     clock = pygame.time.Clock()
     last_status_print = 0.0
     running = True
+    if tracker_pending_message is not None:
+        # Surface the no-glasses status in the GL output too, so a user
+        # who only sees the rendered window (not the terminal) gets it.
+        _show_hud(tracker_pending_message, duration=3.0)
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:

@@ -10,7 +10,7 @@ from .protocol import (
     ParseStats,
 )
 from .tracker import HeadTracker, Pose
-from .stream import PoseStream, PoseSnapshot
+from .stream import PoseStream, PoseSnapshot, is_reachable
 
 __all__ = [
     "DEFAULT_HOST",
@@ -26,4 +26,5 @@ __all__ = [
     "Pose",
     "PoseStream",
     "PoseSnapshot",
+    "is_reachable",
 ]

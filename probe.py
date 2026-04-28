@@ -29,6 +29,8 @@ import sys
 import time
 from typing import List, Optional
 
+import math
+
 from xreal_one import (
     DEFAULT_HOST,
     DEFAULT_STREAM_PORT,
@@ -210,6 +212,86 @@ def cmd_imu(host: str, port: int, count: int) -> int:
     return 0
 
 
+def cmd_mag(host: str, port: int) -> int:
+    """Live magnetometer diagnostic: prints headings computed from six
+    different axis remaps so we can experimentally find which one tracks
+    yaw 1:1 on this device. Calibrate (still), then rotate the head ~30
+    deg left/right slowly. The variant whose value changes the same
+    amount as `y` is the correct mag remap."""
+    print(f"connecting to {host}:{port} (mag diagnostic)...", flush=True)
+    sock = _connect(host, port)
+    framer = StreamFramer()
+    tracker = HeadTracker()
+    latest_m = [0.0, 0.0, 0.0]
+
+    # Six axis permutations; label = the mapping from raw (mx,my,mz) to
+    # the (x,y,z) we feed into tilt-compensation.
+    variants = [
+        ("xyz", lambda m: (m[0], m[1], m[2])),
+        ("xzy", lambda m: (m[0], m[2], m[1])),
+        ("yxz", lambda m: (m[1], m[0], m[2])),
+        ("yzx", lambda m: (m[1], m[2], m[0])),
+        ("zxy", lambda m: (m[2], m[0], m[1])),
+        ("zyx", lambda m: (m[2], m[1], m[0])),
+    ]
+
+    print("rotate head L/R slowly. Find the variant that tracks 'y' 1:1.")
+    print("Ctrl+C to quit.\n", flush=True)
+
+    last_print = 0.0
+    try:
+        while True:
+            chunk = _read_chunk(sock)
+            if chunk:
+                for report in framer.append(chunk):
+                    if isinstance(report, ImuReport):
+                        tracker.feed(report)
+                    elif isinstance(report, MagReport):
+                        latest_m[0] = report.mx
+                        latest_m[1] = report.my
+                        latest_m[2] = report.mz
+
+            now = time.monotonic()
+            if now - last_print > 0.15:
+                last_print = now
+                if not tracker.is_calibrated:
+                    pct = int(tracker.calibration_progress * 100)
+                    sys.stdout.write(f"\rcalibrating {pct:3d}%   ")
+                    sys.stdout.flush()
+                    continue
+
+                pose = tracker.absolute()
+                pr = math.radians(pose.pitch_deg)
+                rr = math.radians(pose.roll_deg)
+                cp, sp = math.cos(pr), math.sin(pr)
+                cr, sr = math.cos(rr), math.sin(rr)
+
+                parts = [f"y{pose.yaw_deg:+6.1f}"]
+                for label, fn in variants:
+                    a, b, c = fn(latest_m)
+                    nrm = math.sqrt(a * a + b * b + c * c)
+                    if nrm < 1e-6:
+                        parts.append(f"{label}=----")
+                        continue
+                    a /= nrm
+                    b /= nrm
+                    c /= nrm
+                    # Tilt-compensated horizontal magnetic vector
+                    mxh = a * cp + b * sr * sp + c * cr * sp
+                    myh = b * cr - c * sr
+                    h = math.degrees(math.atan2(-myh, mxh))
+                    parts.append(f"{label}{h:+6.1f}")
+
+                sys.stdout.write("\r" + "  ".join(parts)[:200])
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sock.close()
+        print()
+    return 0
+
+
 def cmd_pose(host: str, port: int) -> int:
     print(f"connecting to {host}:{port} (pose mode)...", flush=True)
     print("keep glasses still on a flat surface during calibration.", flush=True)
@@ -279,6 +361,7 @@ def main() -> int:
     i.add_argument("--count", type=int, default=20)
 
     sub.add_parser("pose", help="live pose after calibration")
+    sub.add_parser("mag", help="live mag-axis diagnostic for yaw fusion tuning")
 
     args = p.parse_args()
     try:
@@ -288,6 +371,8 @@ def main() -> int:
             return cmd_imu(args.host, args.port, args.count)
         if args.cmd == "pose":
             return cmd_pose(args.host, args.port)
+        if args.cmd == "mag":
+            return cmd_mag(args.host, args.port)
     except (ConnectionRefusedError, OSError) as e:
         print(f"connection failed: {e}", file=sys.stderr)
         if isinstance(e, OSError) and e.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH):

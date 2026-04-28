@@ -552,21 +552,6 @@ def main() -> int:
                     video_stream.set_speed(new_speed)
                     _sync_audio()
                     print(f"\n[speed {new_speed:.0f}x]")
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and video_stream is not None:
-                w_now, h_now = pygame.display.get_window_size()
-                mx, my = event.pos
-                eye_w = w_now * 0.5
-                eye_x = mx if mx < eye_w else mx - eye_w
-                eye_uv_x = eye_x / max(1.0, eye_w)
-                eye_uv_y = (h_now - my) / max(1.0, h_now)
-                if (PB_BAR_X0 < eye_uv_x < PB_BAR_X1 and
-                        PB_HIT_Y0 < eye_uv_y < PB_HIT_Y1 and
-                        video_stream.duration_seconds > 0):
-                    fraction = (eye_uv_x - PB_BAR_X0) / (PB_BAR_X1 - PB_BAR_X0)
-                    target = fraction * video_stream.duration_seconds
-                    video_stream.request_seek(target)
-                    _sync_audio()  # immediate; will refresh again next frame after pts updates
-                    print(f"\n[seek to {target:5.1f}s / {video_stream.duration_seconds:5.1f}s]")
                 elif event.key == pygame.K_UP:
                     fov_diag_deg = max(20.0, fov_diag_deg - 2.0)
                     print(f"\n[fov_diag = {fov_diag_deg:.1f}]")
@@ -588,6 +573,21 @@ def main() -> int:
                         )
                     except TypeError:
                         screen = pygame.display.set_mode(new_size, new_flags, vsync=1)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and video_stream is not None:
+                w_now, h_now = pygame.display.get_window_size()
+                mx, my = event.pos
+                eye_w = w_now * 0.5
+                eye_x = mx if mx < eye_w else mx - eye_w
+                eye_uv_x = eye_x / max(1.0, eye_w)
+                eye_uv_y = (h_now - my) / max(1.0, h_now)
+                if (PB_BAR_X0 < eye_uv_x < PB_BAR_X1 and
+                        PB_HIT_Y0 < eye_uv_y < PB_HIT_Y1 and
+                        video_stream.duration_seconds > 0):
+                    fraction = (eye_uv_x - PB_BAR_X0) / (PB_BAR_X1 - PB_BAR_X0)
+                    target = fraction * video_stream.duration_seconds
+                    video_stream.request_seek(target)
+                    _sync_audio()  # immediate; will refresh again next frame after pts updates
+                    print(f"\n[seek to {target:5.1f}s / {video_stream.duration_seconds:5.1f}s]")
 
         w, h = pygame.display.get_window_size()
         gl.glViewport(0, 0, w, h)

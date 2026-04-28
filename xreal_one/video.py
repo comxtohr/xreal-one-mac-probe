@@ -226,16 +226,6 @@ class VideoStream:
                     if self._seek_target is not None:
                         return
 
-                # Pause loop: hold this frame until unpaused. We don't decode
-                # ahead while paused; on resume we re-anchor the wall clock.
-                while self._running and self._paused:
-                    with self._lock:
-                        if self._seek_target is not None:
-                            return
-                    time.sleep(0.05)
-                if not self._running:
-                    return
-
                 if frame.pts is not None and time_base > 0:
                     pts = float(frame.pts) * time_base
                 else:
@@ -250,17 +240,32 @@ class VideoStream:
                 rgb = frame.reformat(width=tw, height=th, format="rgb24")
                 arr = rgb.to_ndarray()  # shape (th, tw, 3) uint8
 
+                # Publish this frame BEFORE the pause-hold so seeking while
+                # paused immediately swaps in the target frame instead of
+                # leaving the old one on screen.
                 with self._lock:
                     self._latest_frame = arr
                     self._latest_pts = pts
                     self._frame_count += 1
+
+                # Pause loop runs after publish: keeps the just-shown frame
+                # frozen on screen and waits for either resume or a seek.
+                while self._running and self._paused:
+                    with self._lock:
+                        if self._seek_target is not None:
+                            return
+                    time.sleep(0.05)
+                if not self._running:
+                    return
+
+                # Read timeline state after pause exit so re-anchor uses
+                # the current pts and the wall clock at the moment of
+                # resume - smooth restart without "catch-up" jumps.
+                with self._lock:
                     timeline_dirty = self._timeline_dirty
                     self._timeline_dirty = False
                     speed = max(0.01, self._speed)
 
-                # Re-anchor the wall-clock reference whenever pause toggled or
-                # speed changed, so resumed playback continues from the
-                # current PTS instead of trying to "catch up".
                 if timeline_dirty:
                     self._start_wall = time.monotonic() - pts / speed
 

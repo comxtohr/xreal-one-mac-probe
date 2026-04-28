@@ -27,6 +27,7 @@ import time
 from typing import Optional
 
 import av
+import av.filter
 import numpy as np
 
 try:
@@ -209,18 +210,70 @@ class AudioPlayer:
                 break
 
     @staticmethod
-    def _make_resampler(speed: float) -> av.AudioResampler:
-        """Build a resampler whose output rate scales inversely with the
-        requested playback speed. The samples are then fed to a fixed
-        48 kHz sounddevice stream, which "plays them too fast" relative to
-        their declared rate — net effect: speed-up (or slow-down) without
-        any real-time time-stretching library, at the cost of pitch
-        shifting (chipmunk effect at 2x/4x). 1x is a true 48 kHz
-        passthrough so default playback has no pitch change."""
-        target_rate = max(4000, int(round(SAMPLE_RATE / max(0.1, speed))))
-        return av.AudioResampler(
-            format="flt", layout="stereo", rate=target_rate
+    def _build_atempo_graph(template_stream, speed: float):
+        """abuffer -> atempo*N -> abuffersink. Uses explicit args (not
+        template=) for PyAV-version-stability. atempo's per-stage range
+        is [0.5, 2.0]; chain stages for speeds outside that. Output
+        frames stay in source format - we resample after the graph.
+
+        Raises on configure failure so the caller can fall back."""
+        graph = av.filter.Graph()
+        tb = template_stream.time_base
+        abuf_args = (
+            f"time_base={tb.numerator}/{tb.denominator}:"
+            f"sample_rate={template_stream.rate}:"
+            f"sample_fmt={template_stream.format.name}:"
+            f"channel_layout={template_stream.layout.name}"
         )
+        buf = graph.add("abuffer", abuf_args)
+        sink = graph.add("abuffersink")
+
+        prev = buf
+        stages = []
+        remaining = speed
+        while remaining > 2.0:
+            stages.append(2.0)
+            remaining /= 2.0
+        while remaining < 0.5:
+            stages.append(0.5)
+            remaining *= 2.0
+        stages.append(remaining)
+        for s in stages:
+            node = graph.add("atempo", f"{s:.4f}")
+            prev.link_to(node)
+            prev = node
+
+        prev.link_to(sink)
+        graph.configure()
+        return graph
+
+    def _make_pipeline(self, stream, speed: float):
+        """Returns (graph_or_None, resampler).
+
+        - 1x: graph=None, resampler converts to flt/48k/stereo (passthrough
+          on a 48 kHz source).
+        - other speeds: try atempo graph for pitch-preserving time-stretch;
+          if that fails to build, fall back to a chipmunk-style resampler
+          (output rate = 48000/speed, fed to a fixed 48 kHz device — plays
+          faster but pitch shifts up). Always preferable to silence."""
+        std_resampler = av.AudioResampler(
+            format="flt", layout="stereo", rate=SAMPLE_RATE
+        )
+        if abs(speed - 1.0) < 1e-3:
+            return None, std_resampler
+        try:
+            graph = self._build_atempo_graph(stream, speed)
+            return graph, std_resampler
+        except Exception as e:
+            print(
+                f"audio: atempo filter unavailable ({e}); "
+                f"falling back to pitch-shifted speed-up at {speed:.1f}x"
+            )
+            chipmunk = av.AudioResampler(
+                format="flt", layout="stereo",
+                rate=max(4000, int(round(SAMPLE_RATE / max(0.1, speed)))),
+            )
+            return None, chipmunk
 
     def _push_chunk(self, arr) -> bool:
         """Push one numpy chunk to the playback buffer with backpressure.
@@ -268,7 +321,7 @@ class AudioPlayer:
                 except Exception:
                     pass
 
-            resampler = self._make_resampler(current_speed)
+            graph, resampler = self._make_pipeline(stream, current_speed)
 
             for packet in container.demux(stream):
                 if self._stop:
@@ -279,7 +332,7 @@ class AudioPlayer:
                     if self._speed_dirty:
                         current_speed = self._speed
                         self._speed_dirty = False
-                        resampler = self._make_resampler(current_speed)
+                        graph, resampler = self._make_pipeline(stream, current_speed)
 
                 for frame in packet.decode():
                     if self._stop:
@@ -290,7 +343,7 @@ class AudioPlayer:
                         if self._speed_dirty:
                             current_speed = self._speed
                             self._speed_dirty = False
-                            resampler = self._make_resampler(current_speed)
+                            graph, resampler = self._make_pipeline(stream, current_speed)
 
                     while self._paused and not self._stop:
                         with self._state_lock:
@@ -299,23 +352,51 @@ class AudioPlayer:
                             if self._speed_dirty:
                                 current_speed = self._speed
                                 self._speed_dirty = False
-                                resampler = self._make_resampler(current_speed)
+                                graph, resampler = self._make_pipeline(stream, current_speed)
                         time.sleep(0.05)
                     if self._stop:
                         return
 
-                    out = resampler.resample(frame)
-                    if out is None:
-                        continue
-                    frames_out = out if isinstance(out, list) else [out]
-                    for f in frames_out:
-                        if f is None:
-                            continue
+                    # Source frames go through atempo (if non-1x and graph
+                    # built) and then through resampler to flt/48k/stereo.
+                    if graph is not None:
                         try:
-                            arr = f.to_ndarray()
+                            graph.push(frame)
                         except Exception:
                             continue
-                        if not self._push_chunk(arr):
+                        stretched = []
+                        while True:
+                            try:
+                                stretched.append(graph.pull())
+                            except (BlockingIOError, av.error.EOFError):
+                                break
+                            except av.AVError:
+                                break
+                        for sf in stretched:
+                            self._consume_resampler(resampler, sf)
+                            with self._state_lock:
+                                if self._seek_target is not None or self._speed_dirty:
+                                    return
+                    else:
+                        if not self._consume_resampler(resampler, frame):
                             return
         finally:
             container.close()
+
+    def _consume_resampler(self, resampler, frame) -> bool:
+        """Resample one source frame and push the resulting samples to the
+        playback buffer. Returns False on seek/speed-change interrupt."""
+        out = resampler.resample(frame)
+        if out is None:
+            return True
+        frames_out = out if isinstance(out, list) else [out]
+        for f in frames_out:
+            if f is None:
+                continue
+            try:
+                arr = f.to_ndarray()
+            except Exception:
+                continue
+            if not self._push_chunk(arr):
+                return False
+        return True

@@ -39,11 +39,16 @@ class AudioPlayer:
         self._mpv_socket: Optional[socket.socket] = None
         self._mpv_socket_path: Optional[str] = None
 
-        # ffplay/afplay state — last-applied desired state
+        # ffplay/afplay state. Because ffplay has no IPC, every change
+        # respawns the process, but we estimate "where it was playing" by
+        # remembering the offset at the last spawn and the wall clock at
+        # spawn time, so resume from pause continues approximately at the
+        # right spot instead of restarting from the last seek point.
         self._ff_proc: Optional[subprocess.Popen] = None
         self._ff_active: bool = False
         self._ff_speed: float = 1.0
-        self._ff_offset: float = 0.0
+        self._ff_play_offset: float = 0.0       # source pts at the moment we spawned
+        self._ff_play_wall: float = 0.0         # monotonic wall clock at spawn
 
     @property
     def backend(self) -> Optional[str]:
@@ -93,12 +98,22 @@ class AudioPlayer:
 
     # --------------- public state setter ---------------
 
-    def set_state(self, active: bool, speed: float, offset_sec: float) -> None:
+    def set_state(self, active: bool, speed: float) -> None:
+        """Apply pause/play and speed only - position is left alone. Use
+        seek() for an actual jump."""
         if self._backend == "mpv":
-            self._set_state_mpv(active, speed, offset_sec)
+            self._set_state_mpv(active, speed)
         elif self._backend == "ffplay":
-            self._set_state_ffplay(active, speed, offset_sec)
-        # afplay has no IPC and no seek; ignore.
+            self._set_state_ffplay(active, speed)
+        # afplay has no IPC; ignore.
+
+    def seek(self, offset_sec: float) -> None:
+        """Jump to a specific position in seconds."""
+        offset_sec = max(0.0, offset_sec)
+        if self._backend == "mpv":
+            self._seek_mpv(offset_sec)
+        elif self._backend == "ffplay":
+            self._seek_ffplay(offset_sec)
 
     # --------------- mpv backend ---------------
 
@@ -159,14 +174,20 @@ class AudioPlayer:
         except (OSError, socket.timeout):
             pass
 
-    def _set_state_mpv(self, active: bool, speed: float, offset_sec: float) -> None:
+    def _set_state_mpv(self, active: bool, speed: float) -> None:
         speed = max(0.1, min(8.0, speed))
-        offset_sec = max(0.0, offset_sec)
-        # Send all three; mpv applies them in order. Property changes are
-        # near-instant; "exact" seek is sub-frame on most files.
+        # Pause is essentially free; speed change is internal time-stretch
+        # (no buffer drop). Crucially, do NOT send seek here — that would
+        # force mpv to re-decode every pause toggle, audible as "audio
+        # restarts from a different spot".
         self._mpv_send({"command": ["set_property", "pause", not active]})
         self._mpv_send({"command": ["set_property", "speed", float(speed)]})
-        self._mpv_send({"command": ["seek", float(offset_sec), "absolute", "exact"]})
+
+    def _seek_mpv(self, offset_sec: float) -> None:
+        # Default seek mode (no "exact"). mpv jumps to the nearest
+        # decode-friendly point, ~10x faster than exact mode on HEVC and
+        # plenty accurate for a manual progress-bar click.
+        self._mpv_send({"command": ["seek", float(offset_sec), "absolute"]})
 
     def _cleanup_mpv(self) -> None:
         if self._mpv_socket is not None:
@@ -194,8 +215,9 @@ class AudioPlayer:
     def _start_ffplay_initial(self) -> None:
         self._ff_active = True
         self._ff_speed = 1.0
-        self._ff_offset = 0.0
-        self._ff_proc = self._spawn_ffplay()
+        self._ff_play_offset = 0.0
+        self._ff_play_wall = time.monotonic()
+        self._ff_proc = self._spawn_ffplay(self._ff_play_offset)
 
     def _start_afplay_initial(self) -> None:
         self._ff_active = True
@@ -207,33 +229,46 @@ class AudioPlayer:
             preexec_fn=os.setsid,
         )
 
-    def _set_state_ffplay(self, active: bool, speed: float, offset_sec: float) -> None:
+    def _ffplay_estimate_pos(self) -> float:
+        """Best guess of where ffplay is right now in the source file."""
+        if self._ff_proc is None or not self._ff_active:
+            return self._ff_play_offset
+        elapsed = (time.monotonic() - self._ff_play_wall) * self._ff_speed
+        return self._ff_play_offset + elapsed
+
+    def _set_state_ffplay(self, active: bool, speed: float) -> None:
         speed = max(0.1, min(8.0, speed))
-        offset_sec = max(0.0, offset_sec)
         proc_alive = self._ff_proc is not None and self._ff_proc.poll() is None
-        nothing_changed = (
-            active == self._ff_active
-            and abs(speed - self._ff_speed) < 1e-3
-            and abs(offset_sec - self._ff_offset) < 0.05
-            and (proc_alive or not active)
-        )
-        if nothing_changed:
+        if active == self._ff_active and abs(speed - self._ff_speed) < 1e-3 and proc_alive:
             return
+        # Capture where we are RIGHT NOW so the new spawn picks up from there
+        # instead of restarting at the last seek point.
+        new_offset = self._ffplay_estimate_pos()
         self._ff_active = active
         self._ff_speed = speed
-        self._ff_offset = offset_sec
         if self._ff_proc is not None:
             self._kill_proc_pg(self._ff_proc)
             self._ff_proc = None
         if active:
-            self._ff_proc = self._spawn_ffplay()
+            self._ff_play_offset = new_offset
+            self._ff_play_wall = time.monotonic()
+            self._ff_proc = self._spawn_ffplay(new_offset)
 
-    def _spawn_ffplay(self) -> Optional[subprocess.Popen]:
+    def _seek_ffplay(self, offset_sec: float) -> None:
+        if self._ff_proc is not None:
+            self._kill_proc_pg(self._ff_proc)
+            self._ff_proc = None
+        self._ff_play_offset = offset_sec
+        self._ff_play_wall = time.monotonic()
+        if self._ff_active:
+            self._ff_proc = self._spawn_ffplay(offset_sec)
+
+    def _spawn_ffplay(self, offset_sec: float) -> Optional[subprocess.Popen]:
         args = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"]
         if self.loop:
             args += ["-loop", "0"]
-        if self._ff_offset > 0.0:
-            args += ["-ss", f"{self._ff_offset:.3f}"]
+        if offset_sec > 0.0:
+            args += ["-ss", f"{offset_sec:.3f}"]
         if abs(self._ff_speed - 1.0) > 1e-3:
             args += ["-af", self._atempo_chain(self._ff_speed)]
         args.append(self.path)

@@ -503,22 +503,16 @@ def main() -> int:
         if audio_player.backend:
             print(f"audio backend: {audio_player.backend}")
 
-    def _sync_audio(offset_override: Optional[float] = None) -> None:
-        """Re-issue audio state matching current video state. For seek,
-        pass `offset_override` because video.latest_pts hasn't caught up
-        yet (the decoder thread is asynchronous), so reading it would
-        respawn audio at the OLD position."""
+    def _sync_audio() -> None:
+        """Re-issue audio pause / speed only. Position is left to the audio
+        backend (mpv: continues seamlessly across pause; ffplay: estimates
+        elapsed time and respawns at the right spot). Use audio_player.seek()
+        for an explicit jump."""
         if audio_player is None or video_stream is None:
             return
-        offset = (
-            offset_override
-            if offset_override is not None
-            else video_stream.latest_pts
-        )
         audio_player.set_state(
             active=not video_stream.is_paused,
             speed=video_stream.speed,
-            offset_sec=offset,
         )
 
     # Progress-bar hit area (matches the shader constants in FRAGMENT_SRC).
@@ -689,11 +683,8 @@ def main() -> int:
                         audio_player.seek_latency_seconds if audio_player is not None else 0.0
                     )
                     video_stream.request_seek(target, audio_compensation=audio_lat)
-                    # Use `target` directly: video.latest_pts hasn't been
-                    # updated yet because the decode thread is async.
-                    # Speed (and pause state) are preserved naturally since
-                    # _sync_audio reads video_stream.speed.
-                    _sync_audio(offset_override=target)
+                    if audio_player is not None:
+                        audio_player.seek(target)
                     mins, secs = divmod(int(target), 60)
                     _show_hud(f"{mins:d}:{secs:02d}")
 

@@ -418,16 +418,7 @@ def main() -> int:
 
     display_idx, native_size = _pick_display(args.display)
 
-    # If neither glasses display (>=3000 wide) nor an explicit --display is
-    # present, auto-fall-back to a small window. Going fullscreen on the
-    # user's normal Mac display when they're just running without glasses
-    # would steal the whole screen.
-    no_xreal_display = native_size[0] < 3000 and args.display is None
-    windowed = args.windowed or no_xreal_display
-    if no_xreal_display and not args.windowed:
-        print("no XREAL display detected; running windowed. "
-              "Pass --display N to override.")
-
+    windowed = args.windowed
     if windowed:
         size = (1920, 540)
         flags = pygame.OPENGL | pygame.DOUBLEBUF

@@ -533,6 +533,22 @@ def main() -> int:
     hud_texture_id = int(gl.glGenTextures(1))
     hud_texture_size = [1, 1]
     hud_until = 0.0
+    # Seed the HUD texture with a 1x1 black pixel so the GL sampler is
+    # always "loadable" even before _show_hud is called for the first time.
+    # Otherwise some drivers log "POSSIBLE ISSUE: unit N is unloadable"
+    # warnings on the first frame. The same texture also doubles as a
+    # placeholder we bind to unit 0 when there's no video loaded.
+    gl.glBindTexture(gl.GL_TEXTURE_2D, hud_texture_id)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+    gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+    gl.glTexImage2D(
+        gl.GL_TEXTURE_2D, 0, gl.GL_RGB, 1, 1, 0,
+        gl.GL_RGB, gl.GL_UNSIGNED_BYTE,
+        np.zeros((1, 1, 3), dtype=np.uint8),
+    )
 
     def _show_hud(message: str, duration: float = 1.5) -> None:
         nonlocal hud_until
@@ -775,14 +791,22 @@ def main() -> int:
                 x_center + hud_w_eye * 0.5,
                 y_top,
             )
-            gl.glActiveTexture(gl.GL_TEXTURE1)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, hud_texture_id)
-            gl.glUniform1i(u_hud, 1)
-            gl.glActiveTexture(gl.GL_TEXTURE0)  # restore
-        if video_stream is not None:
-            gl.glActiveTexture(gl.GL_TEXTURE0)
+        # Always bind a texture to both sampler units, even when the
+        # current render path doesn't sample them. macOS GL drivers warn
+        # ("unit N is unloadable") if a sampler2D uniform points at a
+        # texture unit with no texture object bound. The HUD texture is
+        # always loaded (1x1 black at startup, real text after _show_hud)
+        # so it doubles as a placeholder for the video sampler too.
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        if video_stream is not None and video_tex_size[0] > 0:
             gl.glBindTexture(gl.GL_TEXTURE_2D, video_tex)
-            gl.glUniform1i(u_video, 0)
+        else:
+            gl.glBindTexture(gl.GL_TEXTURE_2D, hud_texture_id)
+        gl.glUniform1i(u_video, 0)
+        gl.glActiveTexture(gl.GL_TEXTURE1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, hud_texture_id)
+        gl.glUniform1i(u_hud, 1)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
 
         gl.glBindVertexArray(vao)
         gl.glDrawArrays(gl.GL_TRIANGLES, 0, 6)

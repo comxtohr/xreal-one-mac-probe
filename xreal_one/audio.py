@@ -27,7 +27,6 @@ import time
 from typing import Optional
 
 import av
-import av.filter
 import numpy as np
 
 try:
@@ -210,40 +209,18 @@ class AudioPlayer:
                 break
 
     @staticmethod
-    def _build_graph(template_stream, speed: float) -> av.filter.Graph:
-        """Build a filter graph: abuffer -> [atempo chain] -> aformat ->
-        abuffersink. The atempo filter has a per-instance range of
-        [0.5, 2.0]; chain stages to extend beyond that. aformat at the
-        end forces the final samples to flt interleaved stereo @ 48 kHz
-        regardless of the source's native format/rate."""
-        graph = av.filter.Graph()
-        buf = graph.add_abuffer(template=template_stream)
-        sink = graph.add_abuffersink()
-
-        prev = buf
-        if abs(speed - 1.0) > 1e-3:
-            stages = []
-            remaining = speed
-            while remaining > 2.0:
-                stages.append(2.0)
-                remaining /= 2.0
-            while remaining < 0.5:
-                stages.append(0.5)
-                remaining *= 2.0
-            stages.append(remaining)
-            for s in stages:
-                node = graph.add("atempo", f"{s:.4f}")
-                prev.link_to(node)
-                prev = node
-
-        fmt = graph.add(
-            "aformat",
-            f"sample_fmts=flt:sample_rates={SAMPLE_RATE}:channel_layouts=stereo",
+    def _make_resampler(speed: float) -> av.AudioResampler:
+        """Build a resampler whose output rate scales inversely with the
+        requested playback speed. The samples are then fed to a fixed
+        48 kHz sounddevice stream, which "plays them too fast" relative to
+        their declared rate — net effect: speed-up (or slow-down) without
+        any real-time time-stretching library, at the cost of pitch
+        shifting (chipmunk effect at 2x/4x). 1x is a true 48 kHz
+        passthrough so default playback has no pitch change."""
+        target_rate = max(4000, int(round(SAMPLE_RATE / max(0.1, speed))))
+        return av.AudioResampler(
+            format="flt", layout="stereo", rate=target_rate
         )
-        prev.link_to(fmt)
-        fmt.link_to(sink)
-        graph.configure()
-        return graph
 
     def _push_chunk(self, arr) -> bool:
         """Push one numpy chunk to the playback buffer with backpressure.
@@ -268,16 +245,6 @@ class AudioPlayer:
             time.sleep(0.005)
         return False
 
-    def _make_pipeline(self, stream, speed):
-        """At 1x use a plain AudioResampler (proven path). For non-1x build
-        an atempo filter graph so playback keeps its pitch. Returns
-        (graph_or_None, resampler_or_None)."""
-        if abs(speed - 1.0) < 1e-3:
-            return None, av.AudioResampler(
-                format="flt", layout="stereo", rate=SAMPLE_RATE
-            )
-        return self._build_graph(stream, speed), None
-
     def _play_once(self) -> None:
         with self._state_lock:
             offset = self._seek_target if self._seek_target is not None else 0.0
@@ -301,7 +268,7 @@ class AudioPlayer:
                 except Exception:
                     pass
 
-            graph, resampler = self._make_pipeline(stream, current_speed)
+            resampler = self._make_resampler(current_speed)
 
             for packet in container.demux(stream):
                 if self._stop:
@@ -312,7 +279,7 @@ class AudioPlayer:
                     if self._speed_dirty:
                         current_speed = self._speed
                         self._speed_dirty = False
-                        graph, resampler = self._make_pipeline(stream, current_speed)
+                        resampler = self._make_resampler(current_speed)
 
                 for frame in packet.decode():
                     if self._stop:
@@ -323,7 +290,7 @@ class AudioPlayer:
                         if self._speed_dirty:
                             current_speed = self._speed
                             self._speed_dirty = False
-                            graph, resampler = self._make_pipeline(stream, current_speed)
+                            resampler = self._make_resampler(current_speed)
 
                     while self._paused and not self._stop:
                         with self._state_lock:
@@ -332,44 +299,23 @@ class AudioPlayer:
                             if self._speed_dirty:
                                 current_speed = self._speed
                                 self._speed_dirty = False
-                                graph, resampler = self._make_pipeline(stream, current_speed)
+                                resampler = self._make_resampler(current_speed)
                         time.sleep(0.05)
                     if self._stop:
                         return
 
-                    if resampler is not None:
-                        # 1x path: simple resample to flt stereo 48 kHz.
-                        out = resampler.resample(frame)
-                        if out is None:
+                    out = resampler.resample(frame)
+                    if out is None:
+                        continue
+                    frames_out = out if isinstance(out, list) else [out]
+                    for f in frames_out:
+                        if f is None:
                             continue
-                        frames_out = out if isinstance(out, list) else [out]
-                        for f in frames_out:
-                            if f is None:
-                                continue
-                            try:
-                                arr = f.to_ndarray()
-                            except Exception:
-                                continue
-                            if not self._push_chunk(arr):
-                                return
-                    else:
-                        # >1x or <1x: atempo filter graph for pitch preservation.
                         try:
-                            graph.push(frame)
+                            arr = f.to_ndarray()
                         except Exception:
                             continue
-                        while True:
-                            try:
-                                out = graph.pull()
-                            except (BlockingIOError, av.error.EOFError):
-                                break
-                            except av.AVError:
-                                break
-                            try:
-                                arr = out.to_ndarray()
-                            except Exception:
-                                continue
-                            if not self._push_chunk(arr):
-                                return
+                        if not self._push_chunk(arr):
+                            return
         finally:
             container.close()

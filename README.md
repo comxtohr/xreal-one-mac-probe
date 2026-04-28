@@ -178,9 +178,10 @@ sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 | D   | toggle the green SBS-split debug line |
 | Q   | quit |
 
-Audio: by default the viewer spawns `ffplay -nodisp -loop 0` (or falls
-back to macOS `afplay`) on the same video file so the AAC track plays
-through the system speakers. Pass `--mute` to disable.
+Audio: the viewer prefers **mpv** as the audio backend (single process
+controlled over JSON IPC, near-zero latency on pause / seek / speed),
+falling back to ffplay or afplay if mpv isn't installed. Install with
+`brew install mpv`. Pass `--mute` to disable audio entirely.
 
 ## Provenance
 

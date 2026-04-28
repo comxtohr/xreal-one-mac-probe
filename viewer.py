@@ -685,7 +685,10 @@ def main() -> int:
                         video_stream.duration_seconds > 0):
                     fraction = (eye_uv_x - PB_BAR_X0) / (PB_BAR_X1 - PB_BAR_X0)
                     target = fraction * video_stream.duration_seconds
-                    video_stream.request_seek(target)
+                    audio_lat = (
+                        audio_player.seek_latency_seconds if audio_player is not None else 0.0
+                    )
+                    video_stream.request_seek(target, audio_compensation=audio_lat)
                     # Use `target` directly: video.latest_pts hasn't been
                     # updated yet because the decode thread is async.
                     # Speed (and pause state) are preserved naturally since

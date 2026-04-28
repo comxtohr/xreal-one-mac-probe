@@ -53,6 +53,7 @@ class VideoStream:
         self._speed: float = 1.0
         self._timeline_dirty: bool = False  # set when pause/speed change so we re-anchor
         self._seek_target: Optional[float] = None  # seconds; consumed by _play_once
+        self._seek_audio_compensation: float = 0.0  # bias _start_wall on seek
 
     @property
     def source_size(self) -> Tuple[int, int]:
@@ -107,16 +108,26 @@ class VideoStream:
                 self._speed = speed
                 self._timeline_dirty = True
 
-    def request_seek(self, pts_seconds: float) -> None:
+    def request_seek(
+        self,
+        pts_seconds: float,
+        audio_compensation: float = 0.0,
+    ) -> None:
         """Schedule a seek to `pts_seconds`. The decoder thread breaks out
         of its current decode pass and re-opens the container at the new
-        offset on the next iteration."""
+        offset on the next iteration.
+
+        `audio_compensation` is the number of seconds we expect the audio
+        backend to take to reflect the seek (mpv: ~0, ffplay: ~0.15). The
+        wall-clock anchor is biased by this much so video and audio land
+        at target_pts at roughly the same wall instant."""
         if self._duration > 0:
             pts_seconds = max(0.0, min(pts_seconds, self._duration - 0.05))
         else:
             pts_seconds = max(0.0, pts_seconds)
         with self._lock:
             self._seek_target = pts_seconds
+            self._seek_audio_compensation = max(0.0, audio_compensation)
 
     def start(self) -> None:
         if self._running:
@@ -154,7 +165,9 @@ class VideoStream:
     def _play_once(self) -> None:
         with self._lock:
             start_offset = self._seek_target if self._seek_target is not None else 0.0
+            audio_comp = self._seek_audio_compensation
             self._seek_target = None
+            self._seek_audio_compensation = 0.0
 
         container = av.open(self.path)
         try:
@@ -196,17 +209,14 @@ class VideoStream:
                 except Exception:
                     pass
 
-            # Audio (ffplay) takes ~100-200 ms to spawn + seek + fill the
-            # CoreAudio buffer. Without compensation, video reaches the
-            # target pts before audio has started, leaving them out of
-            # sync until ffplay catches up. Bias the wall-clock anchor by
-            # this delay only on a fresh seek, not on the natural file
-            # restart at EOF (where there's no audio respawn pending).
-            audio_startup_compensation = 0.15 if start_offset > 0.0 else 0.0
+            # Bias the wall-clock anchor by the audio backend's reported
+            # seek latency (mpv: tens of ms, ffplay: ~150 ms). 0 on the
+            # natural file-restart loop (EOF) since audio doesn't re-spawn
+            # there. Only applied on user-initiated seeks.
             self._start_wall = (
                 time.monotonic()
                 - start_offset / max(0.01, self._speed)
-                + audio_startup_compensation
+                + audio_comp
             )
 
             # PyAV's container.seek with backward=True lands on the closest

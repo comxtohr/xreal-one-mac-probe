@@ -181,8 +181,9 @@ sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 Audio: in-process via PyAV + sounddevice — no subprocess. Pause /
 seek / speed are flag flips, not respawns. `pip install sounddevice`
 gets you the wheel with PortAudio bundled (no `brew install` needed).
-Pass `--mute` to disable audio entirely. Non-1x speeds mute audio
-(no real-time time-stretch in this prototype).
+Pass `--mute` to disable audio entirely. Speed changes route the
+decoded audio through ffmpeg's `atempo` filter (chained for >2x), so
+non-1x playback keeps its pitch.
 
 ## Provenance
 

@@ -27,6 +27,7 @@ import time
 from typing import Optional
 
 import av
+import av.filter
 import numpy as np
 
 try:
@@ -56,6 +57,8 @@ class AudioPlayer:
 
         self._stop = False
         self._paused = False
+        self._speed = 1.0
+        self._speed_dirty = False  # decoder rebuilds atempo graph when set
         self._seek_target: Optional[float] = None
 
         # List of (samples, channels)=float32 chunks awaiting playback.
@@ -135,14 +138,26 @@ class AudioPlayer:
     # ---------------- public state setters ----------------
 
     def set_state(self, active: bool, speed: float) -> None:
-        """Pause / resume + speed (no time-stretch; non-1x mutes).
+        """Pause / resume + playback speed.
 
-        On resume from pause or speed -> 1x, the viewer should follow up
-        with seek(video.latest_pts) to re-anchor audio at the current
-        video position. Otherwise audio may be slightly behind the video.
+        Speed != 1 runs the source through an atempo filter chain, so
+        audio plays at the requested rate without pitch shift. Speed
+        changes invalidate any pre-decoded samples (they were rendered
+        at the old tempo); the buffer is cleared and the viewer should
+        follow up with seek(video.latest_pts) to re-anchor.
         """
+        speed = max(0.1, min(8.0, speed))
+        speed_changed = False
         with self._state_lock:
-            self._paused = (not active) or abs(speed - 1.0) > 1e-3
+            self._paused = not active
+            if abs(speed - self._speed) > 1e-3:
+                self._speed = speed
+                self._speed_dirty = True
+                speed_changed = True
+        if speed_changed:
+            with self._buffer_lock:
+                self._buffer.clear()
+                self._buffer_samples = 0
 
     def seek(self, offset_sec: float) -> None:
         offset_sec = max(0.0, offset_sec)
@@ -194,10 +209,83 @@ class AudioPlayer:
             if not self.loop:
                 break
 
+    @staticmethod
+    def _build_graph(template_stream, speed: float) -> av.filter.Graph:
+        """Build a filter graph: abuffer -> [atempo chain] -> aformat ->
+        abuffersink. The atempo filter has a per-instance range of
+        [0.5, 2.0]; chain stages to extend beyond that. aformat at the
+        end forces the final samples to flt interleaved stereo @ 48 kHz
+        regardless of the source's native format/rate."""
+        graph = av.filter.Graph()
+        buf = graph.add_abuffer(template=template_stream)
+        sink = graph.add_abuffersink()
+
+        prev = buf
+        if abs(speed - 1.0) > 1e-3:
+            stages = []
+            remaining = speed
+            while remaining > 2.0:
+                stages.append(2.0)
+                remaining /= 2.0
+            while remaining < 0.5:
+                stages.append(0.5)
+                remaining *= 2.0
+            stages.append(remaining)
+            for s in stages:
+                node = graph.add("atempo", f"{s:.4f}")
+                prev.link_to(node)
+                prev = node
+
+        fmt = graph.add(
+            "aformat",
+            f"sample_fmts=flt:sample_rates={SAMPLE_RATE}:channel_layouts=stereo",
+        )
+        prev.link_to(fmt)
+        fmt.link_to(sink)
+        graph.configure()
+        return graph
+
+    def _push_filtered_to_buffer(self, graph: av.filter.Graph) -> bool:
+        """Drain whatever the graph has produced into the playback buffer.
+        Returns False if a seek/stop was requested mid-drain."""
+        while True:
+            try:
+                out = graph.pull()
+            except (BlockingIOError, av.error.EOFError):
+                return True
+            except av.AVError:
+                return True
+
+            try:
+                arr = out.to_ndarray()
+            except Exception:
+                continue
+            if arr.size == 0:
+                continue
+            try:
+                arr = arr.reshape(-1, CHANNELS)
+            except ValueError:
+                continue
+            if arr.dtype != np.float32:
+                arr = arr.astype(np.float32, copy=False)
+
+            while not self._stop:
+                with self._state_lock:
+                    if self._seek_target is not None or self._speed_dirty:
+                        return False
+                with self._buffer_lock:
+                    if self._buffer_samples < MAX_BUFFER_SAMPLES:
+                        self._buffer.append(arr)
+                        self._buffer_samples += arr.shape[0]
+                        break
+                time.sleep(0.005)
+
     def _play_once(self) -> None:
         with self._state_lock:
             offset = self._seek_target if self._seek_target is not None else 0.0
             self._seek_target = None
+            current_speed = self._speed
+            self._speed_dirty = False
 
         container = av.open(self.path)
         try:
@@ -215,11 +303,7 @@ class AudioPlayer:
                 except Exception:
                     pass
 
-            # Resample everything to float32 interleaved stereo at the
-            # output rate so the callback can copy without further work.
-            resampler = av.AudioResampler(
-                format="flt", layout="stereo", rate=SAMPLE_RATE
-            )
+            graph = self._build_graph(stream, current_speed)
 
             for packet in container.demux(stream):
                 if self._stop:
@@ -227,6 +311,10 @@ class AudioPlayer:
                 with self._state_lock:
                     if self._seek_target is not None:
                         return
+                    if self._speed_dirty:
+                        current_speed = self._speed
+                        self._speed_dirty = False
+                        graph = self._build_graph(stream, current_speed)
 
                 for frame in packet.decode():
                     if self._stop:
@@ -234,47 +322,29 @@ class AudioPlayer:
                     with self._state_lock:
                         if self._seek_target is not None:
                             return
+                        if self._speed_dirty:
+                            current_speed = self._speed
+                            self._speed_dirty = False
+                            graph = self._build_graph(stream, current_speed)
 
-                    # While paused, hold the decoder so we don't fill
-                    # the buffer ahead of the user's chosen pause point.
+                    # Hold while paused so we don't fill ahead.
                     while self._paused and not self._stop:
                         with self._state_lock:
                             if self._seek_target is not None:
                                 return
+                            if self._speed_dirty:
+                                current_speed = self._speed
+                                self._speed_dirty = False
+                                graph = self._build_graph(stream, current_speed)
                         time.sleep(0.05)
                     if self._stop:
                         return
 
-                    out = resampler.resample(frame)
-                    if out is None:
+                    try:
+                        graph.push(frame)
+                    except Exception:
                         continue
-                    frames_out = out if isinstance(out, list) else [out]
-                    for f in frames_out:
-                        if f is None:
-                            continue
-                        try:
-                            arr = f.to_ndarray()
-                        except Exception:
-                            continue
-                        if arr.size == 0:
-                            continue
-                        try:
-                            arr = arr.reshape(-1, CHANNELS)
-                        except ValueError:
-                            continue
-                        if arr.dtype != np.float32:
-                            arr = arr.astype(np.float32, copy=False)
-
-                        # Back-pressure: don't grow the buffer past 2 s.
-                        while not self._stop:
-                            with self._state_lock:
-                                if self._seek_target is not None:
-                                    return
-                            with self._buffer_lock:
-                                if self._buffer_samples < MAX_BUFFER_SAMPLES:
-                                    self._buffer.append(arr)
-                                    self._buffer_samples += arr.shape[0]
-                                    break
-                            time.sleep(0.005)
+                    if not self._push_filtered_to_buffer(graph):
+                        return  # seek or speed change interrupted drain
         finally:
             container.close()

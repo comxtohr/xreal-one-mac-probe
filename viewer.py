@@ -650,8 +650,10 @@ def main() -> int:
                     new_speed = {pygame.K_1: 1.0, pygame.K_2: 2.0, pygame.K_4: 4.0}[event.key]
                     video_stream.set_speed(new_speed)
                     _sync_audio()
-                    if abs(new_speed - 1.0) < 0.01 and audio_player is not None and not video_stream.is_paused:
-                        # Returning to 1x: realign audio (it was muted at non-1x).
+                    if audio_player is not None and not video_stream.is_paused:
+                        # Speed changed: any pre-decoded samples were at the
+                        # old tempo; reseek audio to the current video pts
+                        # so the new atempo graph picks up from there.
                         audio_player.seek(video_stream.latest_pts)
                     _show_hud(f"{int(new_speed)}x")
                 elif event.key == pygame.K_UP:

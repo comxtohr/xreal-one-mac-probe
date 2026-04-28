@@ -245,40 +245,38 @@ class AudioPlayer:
         graph.configure()
         return graph
 
-    def _push_filtered_to_buffer(self, graph: av.filter.Graph) -> bool:
-        """Drain whatever the graph has produced into the playback buffer.
-        Returns False if a seek/stop was requested mid-drain."""
-        while True:
-            try:
-                out = graph.pull()
-            except (BlockingIOError, av.error.EOFError):
-                return True
-            except av.AVError:
-                return True
+    def _push_chunk(self, arr) -> bool:
+        """Push one numpy chunk to the playback buffer with backpressure.
+        Returns False if a seek/stop/speed-change was requested mid-push."""
+        if arr is None or arr.size == 0:
+            return True
+        try:
+            arr = arr.reshape(-1, CHANNELS)
+        except ValueError:
+            return True
+        if arr.dtype != np.float32:
+            arr = arr.astype(np.float32, copy=False)
+        while not self._stop:
+            with self._state_lock:
+                if self._seek_target is not None or self._speed_dirty:
+                    return False
+            with self._buffer_lock:
+                if self._buffer_samples < MAX_BUFFER_SAMPLES:
+                    self._buffer.append(arr)
+                    self._buffer_samples += arr.shape[0]
+                    return True
+            time.sleep(0.005)
+        return False
 
-            try:
-                arr = out.to_ndarray()
-            except Exception:
-                continue
-            if arr.size == 0:
-                continue
-            try:
-                arr = arr.reshape(-1, CHANNELS)
-            except ValueError:
-                continue
-            if arr.dtype != np.float32:
-                arr = arr.astype(np.float32, copy=False)
-
-            while not self._stop:
-                with self._state_lock:
-                    if self._seek_target is not None or self._speed_dirty:
-                        return False
-                with self._buffer_lock:
-                    if self._buffer_samples < MAX_BUFFER_SAMPLES:
-                        self._buffer.append(arr)
-                        self._buffer_samples += arr.shape[0]
-                        break
-                time.sleep(0.005)
+    def _make_pipeline(self, stream, speed):
+        """At 1x use a plain AudioResampler (proven path). For non-1x build
+        an atempo filter graph so playback keeps its pitch. Returns
+        (graph_or_None, resampler_or_None)."""
+        if abs(speed - 1.0) < 1e-3:
+            return None, av.AudioResampler(
+                format="flt", layout="stereo", rate=SAMPLE_RATE
+            )
+        return self._build_graph(stream, speed), None
 
     def _play_once(self) -> None:
         with self._state_lock:
@@ -303,7 +301,7 @@ class AudioPlayer:
                 except Exception:
                     pass
 
-            graph = self._build_graph(stream, current_speed)
+            graph, resampler = self._make_pipeline(stream, current_speed)
 
             for packet in container.demux(stream):
                 if self._stop:
@@ -314,7 +312,7 @@ class AudioPlayer:
                     if self._speed_dirty:
                         current_speed = self._speed
                         self._speed_dirty = False
-                        graph = self._build_graph(stream, current_speed)
+                        graph, resampler = self._make_pipeline(stream, current_speed)
 
                 for frame in packet.decode():
                     if self._stop:
@@ -325,9 +323,8 @@ class AudioPlayer:
                         if self._speed_dirty:
                             current_speed = self._speed
                             self._speed_dirty = False
-                            graph = self._build_graph(stream, current_speed)
+                            graph, resampler = self._make_pipeline(stream, current_speed)
 
-                    # Hold while paused so we don't fill ahead.
                     while self._paused and not self._stop:
                         with self._state_lock:
                             if self._seek_target is not None:
@@ -335,16 +332,44 @@ class AudioPlayer:
                             if self._speed_dirty:
                                 current_speed = self._speed
                                 self._speed_dirty = False
-                                graph = self._build_graph(stream, current_speed)
+                                graph, resampler = self._make_pipeline(stream, current_speed)
                         time.sleep(0.05)
                     if self._stop:
                         return
 
-                    try:
-                        graph.push(frame)
-                    except Exception:
-                        continue
-                    if not self._push_filtered_to_buffer(graph):
-                        return  # seek or speed change interrupted drain
+                    if resampler is not None:
+                        # 1x path: simple resample to flt stereo 48 kHz.
+                        out = resampler.resample(frame)
+                        if out is None:
+                            continue
+                        frames_out = out if isinstance(out, list) else [out]
+                        for f in frames_out:
+                            if f is None:
+                                continue
+                            try:
+                                arr = f.to_ndarray()
+                            except Exception:
+                                continue
+                            if not self._push_chunk(arr):
+                                return
+                    else:
+                        # >1x or <1x: atempo filter graph for pitch preservation.
+                        try:
+                            graph.push(frame)
+                        except Exception:
+                            continue
+                        while True:
+                            try:
+                                out = graph.pull()
+                            except (BlockingIOError, av.error.EOFError):
+                                break
+                            except av.AVError:
+                                break
+                            try:
+                                arr = out.to_ndarray()
+                            except Exception:
+                                continue
+                            if not self._push_chunk(arr):
+                                return
         finally:
             container.close()

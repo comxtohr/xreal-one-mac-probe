@@ -1,310 +1,280 @@
-"""Audio playback via mpv (preferred) or ffplay (fallback).
+"""In-process audio playback via PyAV + sounddevice.
 
-The mpv backend keeps a single mpv process running from start() to
-stop(), driving pause / seek / speed by sending JSON commands over
-mpv's --input-ipc-server Unix socket. There's no spawn between state
-changes, so seek latency is on the order of one frame and pause is
-effectively instantaneous.
+No subprocess: audio is decoded by PyAV in a worker thread, resampled
+to float32 stereo at the device sample rate, buffered into a small
+deque, and pulled by the sounddevice OutputStream callback.
 
-The ffplay backend kills + respawns the process on every state change.
-That works but adds ~150 ms of spawn delay; it's kept as a fallback
-for systems without mpv installed.
+State changes are flag flips, not respawns:
+- pause: callback fills with zeros; decoder also pauses (so we don't
+  decode forward into the buffer while held).
+- speed != 1: callback fills with zeros (we don't time-stretch). The
+  viewer must call seek(video.latest_pts) when speed returns to 1x to
+  re-anchor audio to the current video position.
+- seek: clear buffer, decoder breaks out of the current pass and
+  re-opens the container at the new offset.
+- stop: stop sounddevice, signal decoder to exit, join.
 
-afplay (macOS built-in) is the last-resort fallback. It has no IPC and
-no -ss; we just play once from the beginning. set_state() is a no-op.
+All sub-frame latency, no spawn delay.
+
+Dependencies: sounddevice (which bundles PortAudio in its macOS wheel).
 """
 
 from __future__ import annotations
 
 import atexit
-import json
-import os
-import shutil
-import signal
-import socket
-import subprocess
+import threading
 import time
-from pathlib import Path
 from typing import Optional
+
+import av
+import numpy as np
+
+try:
+    import sounddevice as sd  # type: ignore
+    _SD_IMPORT_ERROR: Optional[str] = None
+except (ImportError, OSError) as e:  # OSError if portaudio dylib missing
+    sd = None  # type: ignore
+    _SD_IMPORT_ERROR = str(e)
+
+
+SAMPLE_RATE = 48000
+CHANNELS = 2
+# Cap the decode-ahead buffer so we don't grow unbounded while paused.
+# 2 seconds at 48 kHz stereo = 96 000 samples. Plenty of headroom for
+# the audio callback to ride out a hiccup, small enough that resume
+# doesn't immediately replay a wide window of "future" audio.
+MAX_BUFFER_SAMPLES = SAMPLE_RATE * 2
 
 
 class AudioPlayer:
     def __init__(self, path: str, loop: bool = True) -> None:
         self.path = path
         self.loop = loop
-        self._backend: Optional[str] = None
 
-        # mpv state
-        self._mpv_proc: Optional[subprocess.Popen] = None
-        self._mpv_socket: Optional[socket.socket] = None
-        self._mpv_socket_path: Optional[str] = None
+        self._state_lock = threading.Lock()
+        self._buffer_lock = threading.Lock()
 
-        # ffplay/afplay state. Because ffplay has no IPC, every change
-        # respawns the process, but we estimate "where it was playing" by
-        # remembering the offset at the last spawn and the wall clock at
-        # spawn time, so resume from pause continues approximately at the
-        # right spot instead of restarting from the last seek point.
-        self._ff_proc: Optional[subprocess.Popen] = None
-        self._ff_active: bool = False
-        self._ff_speed: float = 1.0
-        self._ff_play_offset: float = 0.0       # source pts at the moment we spawned
-        self._ff_play_wall: float = 0.0         # monotonic wall clock at spawn
+        self._stop = False
+        self._paused = False
+        self._seek_target: Optional[float] = None
+
+        # List of (samples, channels)=float32 chunks awaiting playback.
+        self._buffer: list[np.ndarray] = []
+        self._buffer_samples = 0  # cached sum of [c.shape[0] for c in _buffer]
+
+        self._stream = None
+        self._thread: Optional[threading.Thread] = None
+        self._available = False
 
     @property
     def backend(self) -> Optional[str]:
-        return self._backend
+        return "sounddevice" if self._available else None
 
     @property
     def seek_latency_seconds(self) -> float:
-        """Approximate wall-clock time between a set_state() call and the
-        audio actually reflecting it. Used by VideoStream to bias its
-        wall-clock anchor on seeks so video and audio land on target_pts
-        at roughly the same wall instant."""
-        if self._backend == "mpv":
-            return 0.02
-        if self._backend == "ffplay":
-            return 0.15
+        # In-process; effectively just the audio device's hardware latency.
         return 0.0
 
-    # --------------- start / stop ---------------
+    # ---------------- start / stop ----------------
 
     def start(self) -> None:
-        if shutil.which("mpv"):
-            try:
-                self._start_mpv()
-                self._backend = "mpv"
-            except Exception as e:
-                print(f"audio: mpv launch failed ({e}); falling back to ffplay")
-                self._cleanup_mpv()
-                if shutil.which("ffplay"):
-                    self._backend = "ffplay"
-                    self._start_ffplay_initial()
-        elif shutil.which("ffplay"):
-            self._backend = "ffplay"
-            self._start_ffplay_initial()
-        elif shutil.which("afplay"):
-            self._backend = "afplay"
-            self._start_afplay_initial()
-        else:
-            print("audio: no backend found. install mpv (preferred) or ffmpeg.")
+        if sd is None:
+            print(
+                "audio: sounddevice not available "
+                f"({_SD_IMPORT_ERROR}); running silent.\n"
+                "  install with: pip install sounddevice"
+            )
             return
+        # Verify the file actually has an audio stream (some VR180 demos don't).
+        try:
+            container = av.open(self.path)
+            try:
+                if not container.streams.audio:
+                    print("audio: input file has no audio stream; running silent.")
+                    return
+            finally:
+                container.close()
+        except Exception as e:
+            print(f"audio: failed to probe file ({e}); running silent.")
+            return
+
+        try:
+            self._stream = sd.OutputStream(
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="float32",
+                callback=self._audio_callback,
+                latency="low",
+            )
+            self._stream.start()
+        except Exception as e:
+            print(f"audio: failed to open output stream ({e}); running silent.")
+            self._stream = None
+            return
+
+        self._thread = threading.Thread(
+            target=self._decode_loop, name="xreal-audio", daemon=True
+        )
+        self._thread.start()
+        self._available = True
         atexit.register(self.stop)
 
     def stop(self) -> None:
-        self._cleanup_mpv()
-        if self._ff_proc is not None:
-            self._kill_proc_pg(self._ff_proc)
-            self._ff_proc = None
+        self._stop = True
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+            self._thread = None
 
-    # --------------- public state setter ---------------
+    # ---------------- public state setters ----------------
 
     def set_state(self, active: bool, speed: float) -> None:
-        """Apply pause/play and speed only - position is left alone. Use
-        seek() for an actual jump."""
-        if self._backend == "mpv":
-            self._set_state_mpv(active, speed)
-        elif self._backend == "ffplay":
-            self._set_state_ffplay(active, speed)
-        # afplay has no IPC; ignore.
+        """Pause / resume + speed (no time-stretch; non-1x mutes).
+
+        On resume from pause or speed -> 1x, the viewer should follow up
+        with seek(video.latest_pts) to re-anchor audio at the current
+        video position. Otherwise audio may be slightly behind the video.
+        """
+        with self._state_lock:
+            self._paused = (not active) or abs(speed - 1.0) > 1e-3
 
     def seek(self, offset_sec: float) -> None:
-        """Jump to a specific position in seconds."""
         offset_sec = max(0.0, offset_sec)
-        if self._backend == "mpv":
-            self._seek_mpv(offset_sec)
-        elif self._backend == "ffplay":
-            self._seek_ffplay(offset_sec)
+        with self._state_lock:
+            self._seek_target = offset_sec
+        # Drop in-flight samples so the next callback gets fresh content.
+        with self._buffer_lock:
+            self._buffer.clear()
+            self._buffer_samples = 0
 
-    # --------------- mpv backend ---------------
+    # ---------------- audio thread (callback) ----------------
 
-    def _start_mpv(self) -> None:
-        sock_dir = Path(os.environ.get("TMPDIR", "/tmp"))
-        sock_dir.mkdir(parents=True, exist_ok=True)
-        self._mpv_socket_path = str(sock_dir / f"xreal-mpv-{os.getpid()}.sock")
+    def _audio_callback(self, outdata, frames, time_info, status) -> None:
         try:
-            os.unlink(self._mpv_socket_path)
-        except FileNotFoundError:
-            pass
+            if self._paused:
+                outdata.fill(0.0)
+                return
+            with self._buffer_lock:
+                pos = 0
+                while pos < frames and self._buffer:
+                    chunk = self._buffer[0]
+                    avail = chunk.shape[0]
+                    need = frames - pos
+                    if avail <= need:
+                        outdata[pos:pos + avail] = chunk
+                        pos += avail
+                        self._buffer.pop(0)
+                        self._buffer_samples -= avail
+                    else:
+                        outdata[pos:pos + need] = chunk[:need]
+                        self._buffer[0] = chunk[need:]
+                        self._buffer_samples -= need
+                        pos = frames
+                if pos < frames:
+                    outdata[pos:].fill(0.0)  # underrun
+        except Exception:
+            outdata.fill(0.0)
 
-        args = [
-            "mpv",
-            "--no-video",
-            "--idle=yes",
-            "--keep-open=yes",
-            "--audio-display=no",
-            "--really-quiet",
-            "--load-scripts=no",
-            f"--input-ipc-server={self._mpv_socket_path}",
-        ]
-        if self.loop:
-            args.append("--loop-file=inf")
+    # ---------------- decoder thread ----------------
 
-        self._mpv_proc = subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
-        )
-
-        # Wait for the IPC socket to be created.
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if os.path.exists(self._mpv_socket_path):
+    def _decode_loop(self) -> None:
+        while not self._stop:
+            try:
+                self._play_once()
+            except Exception as e:
+                # Don't spam; brief pause and retry.
+                if not self._stop:
+                    time.sleep(0.5)
+            if not self.loop:
                 break
-            time.sleep(0.02)
-        else:
-            raise RuntimeError("mpv IPC socket did not appear within 2 s")
 
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(1.0)
-        sock.connect(self._mpv_socket_path)
-        self._mpv_socket = sock
+    def _play_once(self) -> None:
+        with self._state_lock:
+            offset = self._seek_target if self._seek_target is not None else 0.0
+            self._seek_target = None
 
-        # Load the file and start playing at 1x from the beginning.
-        self._mpv_send({"command": ["loadfile", self.path]})
-        self._mpv_send({"command": ["set_property", "pause", False]})
-        self._mpv_send({"command": ["set_property", "speed", 1.0]})
-
-    def _mpv_send(self, command: dict) -> None:
-        if self._mpv_socket is None:
-            return
+        container = av.open(self.path)
         try:
-            self._mpv_socket.sendall((json.dumps(command) + "\n").encode("utf-8"))
-        except (OSError, socket.timeout):
-            pass
+            stream = container.streams.audio[0]
+            time_base = float(stream.time_base) if stream.time_base else 0.0
 
-    def _set_state_mpv(self, active: bool, speed: float) -> None:
-        speed = max(0.1, min(8.0, speed))
-        # Pause is essentially free; speed change is internal time-stretch
-        # (no buffer drop). Crucially, do NOT send seek here — that would
-        # force mpv to re-decode every pause toggle, audible as "audio
-        # restarts from a different spot".
-        self._mpv_send({"command": ["set_property", "pause", not active]})
-        self._mpv_send({"command": ["set_property", "speed", float(speed)]})
+            if offset > 0.0 and time_base > 0.0:
+                try:
+                    container.seek(
+                        int(offset / time_base),
+                        any_frame=False,
+                        backward=True,
+                        stream=stream,
+                    )
+                except Exception:
+                    pass
 
-    def _seek_mpv(self, offset_sec: float) -> None:
-        # Default seek mode (no "exact"). mpv jumps to the nearest
-        # decode-friendly point, ~10x faster than exact mode on HEVC and
-        # plenty accurate for a manual progress-bar click.
-        self._mpv_send({"command": ["seek", float(offset_sec), "absolute"]})
+            # Resample everything to float32 interleaved stereo at the
+            # output rate so the callback can copy without further work.
+            resampler = av.AudioResampler(
+                format="flt", layout="stereo", rate=SAMPLE_RATE
+            )
 
-    def _cleanup_mpv(self) -> None:
-        if self._mpv_socket is not None:
-            try:
-                self._mpv_send({"command": ["quit"]})
-            except OSError:
-                pass
-            try:
-                self._mpv_socket.close()
-            except OSError:
-                pass
-            self._mpv_socket = None
-        if self._mpv_proc is not None:
-            self._kill_proc_pg(self._mpv_proc)
-            self._mpv_proc = None
-        if self._mpv_socket_path is not None:
-            try:
-                os.unlink(self._mpv_socket_path)
-            except OSError:
-                pass
-            self._mpv_socket_path = None
+            for packet in container.demux(stream):
+                if self._stop:
+                    return
+                with self._state_lock:
+                    if self._seek_target is not None:
+                        return
 
-    # --------------- ffplay backend (kill+respawn) ---------------
+                for frame in packet.decode():
+                    if self._stop:
+                        return
+                    with self._state_lock:
+                        if self._seek_target is not None:
+                            return
 
-    def _start_ffplay_initial(self) -> None:
-        self._ff_active = True
-        self._ff_speed = 1.0
-        self._ff_play_offset = 0.0
-        self._ff_play_wall = time.monotonic()
-        self._ff_proc = self._spawn_ffplay(self._ff_play_offset)
+                    # While paused, hold the decoder so we don't fill
+                    # the buffer ahead of the user's chosen pause point.
+                    while self._paused and not self._stop:
+                        with self._state_lock:
+                            if self._seek_target is not None:
+                                return
+                        time.sleep(0.05)
+                    if self._stop:
+                        return
 
-    def _start_afplay_initial(self) -> None:
-        self._ff_active = True
-        self._ff_proc = subprocess.Popen(
-            ["afplay", self.path],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
-        )
+                    out = resampler.resample(frame)
+                    if out is None:
+                        continue
+                    frames_out = out if isinstance(out, list) else [out]
+                    for f in frames_out:
+                        if f is None:
+                            continue
+                        try:
+                            arr = f.to_ndarray()
+                        except Exception:
+                            continue
+                        if arr.size == 0:
+                            continue
+                        try:
+                            arr = arr.reshape(-1, CHANNELS)
+                        except ValueError:
+                            continue
+                        if arr.dtype != np.float32:
+                            arr = arr.astype(np.float32, copy=False)
 
-    def _ffplay_estimate_pos(self) -> float:
-        """Best guess of where ffplay is right now in the source file."""
-        if self._ff_proc is None or not self._ff_active:
-            return self._ff_play_offset
-        elapsed = (time.monotonic() - self._ff_play_wall) * self._ff_speed
-        return self._ff_play_offset + elapsed
-
-    def _set_state_ffplay(self, active: bool, speed: float) -> None:
-        speed = max(0.1, min(8.0, speed))
-        proc_alive = self._ff_proc is not None and self._ff_proc.poll() is None
-        if active == self._ff_active and abs(speed - self._ff_speed) < 1e-3 and proc_alive:
-            return
-        # Capture where we are RIGHT NOW so the new spawn picks up from there
-        # instead of restarting at the last seek point.
-        new_offset = self._ffplay_estimate_pos()
-        self._ff_active = active
-        self._ff_speed = speed
-        if self._ff_proc is not None:
-            self._kill_proc_pg(self._ff_proc)
-            self._ff_proc = None
-        if active:
-            self._ff_play_offset = new_offset
-            self._ff_play_wall = time.monotonic()
-            self._ff_proc = self._spawn_ffplay(new_offset)
-
-    def _seek_ffplay(self, offset_sec: float) -> None:
-        if self._ff_proc is not None:
-            self._kill_proc_pg(self._ff_proc)
-            self._ff_proc = None
-        self._ff_play_offset = offset_sec
-        self._ff_play_wall = time.monotonic()
-        if self._ff_active:
-            self._ff_proc = self._spawn_ffplay(offset_sec)
-
-    def _spawn_ffplay(self, offset_sec: float) -> Optional[subprocess.Popen]:
-        args = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"]
-        if self.loop:
-            args += ["-loop", "0"]
-        if offset_sec > 0.0:
-            args += ["-ss", f"{offset_sec:.3f}"]
-        if abs(self._ff_speed - 1.0) > 1e-3:
-            args += ["-af", self._atempo_chain(self._ff_speed)]
-        args.append(self.path)
-        return subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
-        )
-
-    @staticmethod
-    def _atempo_chain(speed: float) -> str:
-        chain = []
-        remaining = speed
-        while remaining > 2.0:
-            chain.append("atempo=2.0")
-            remaining /= 2.0
-        while remaining < 0.5:
-            chain.append("atempo=0.5")
-            remaining *= 2.0
-        chain.append(f"atempo={remaining:.4f}")
-        return ",".join(chain)
-
-    # --------------- shared helpers ---------------
-
-    @staticmethod
-    def _kill_proc_pg(proc: subprocess.Popen) -> None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        try:
-            proc.wait(timeout=0.5)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+                        # Back-pressure: don't grow the buffer past 2 s.
+                        while not self._stop:
+                            with self._state_lock:
+                                if self._seek_target is not None:
+                                    return
+                            with self._buffer_lock:
+                                if self._buffer_samples < MAX_BUFFER_SAMPLES:
+                                    self._buffer.append(arr)
+                                    self._buffer_samples += arr.shape[0]
+                                    break
+                            time.sleep(0.005)
+        finally:
+            container.close()

@@ -640,11 +640,19 @@ def main() -> int:
                 elif event.key == pygame.K_SPACE and video_stream is not None:
                     paused = video_stream.toggle_paused()
                     _sync_audio()
+                    if not paused and audio_player is not None:
+                        # Re-align audio with current video position after
+                        # pause; the in-process audio decoder pauses too,
+                        # so its buffer head may be slightly behind video.
+                        audio_player.seek(video_stream.latest_pts)
                     _show_hud("Paused" if paused else "Playing")
                 elif event.key in (pygame.K_1, pygame.K_2, pygame.K_4) and video_stream is not None:
                     new_speed = {pygame.K_1: 1.0, pygame.K_2: 2.0, pygame.K_4: 4.0}[event.key]
                     video_stream.set_speed(new_speed)
                     _sync_audio()
+                    if abs(new_speed - 1.0) < 0.01 and audio_player is not None and not video_stream.is_paused:
+                        # Returning to 1x: realign audio (it was muted at non-1x).
+                        audio_player.seek(video_stream.latest_pts)
                     _show_hud(f"{int(new_speed)}x")
                 elif event.key == pygame.K_UP:
                     fov_diag_deg = max(20.0, fov_diag_deg - 2.0)

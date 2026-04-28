@@ -178,10 +178,11 @@ sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 | D   | toggle the green SBS-split debug line |
 | Q   | quit |
 
-Audio: the viewer prefers **mpv** as the audio backend (single process
-controlled over JSON IPC, near-zero latency on pause / seek / speed),
-falling back to ffplay or afplay if mpv isn't installed. Install with
-`brew install mpv`. Pass `--mute` to disable audio entirely.
+Audio: in-process via PyAV + sounddevice — no subprocess. Pause /
+seek / speed are flag flips, not respawns. `pip install sounddevice`
+gets you the wheel with PortAudio bundled (no `brew install` needed).
+Pass `--mute` to disable audio entirely. Non-1x speeds mute audio
+(no real-time time-stretch in this prototype).
 
 ## Provenance
 

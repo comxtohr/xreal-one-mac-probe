@@ -78,6 +78,9 @@ uniform float uPlaybackSpeed;    // playback rate, color-coded
 uniform int   uShowHud;          // 1 = draw the transient HUD overlay
 uniform vec4  uHudRect;          // x0, y0, x1, y1 in eye-space UV
 uniform sampler2D uHud;          // RGB texture, dark bg + bright text
+uniform float uUiDisparity;      // per-eye horizontal shift for UI; brings
+                                 // overlays in from "infinity" to a fusable
+                                 // virtual depth. 0 = infinity, ~0.015 ≈ 5 m.
 
 const float PI = 3.14159265359;
 
@@ -233,21 +236,28 @@ void main() {
         if (abs(gl_FragCoord.x - uViewportWidth * 0.5) < 1.5) col = vec3(0.0, 1.0, 0.0);
     }
 
-    // Calibration overlay: a centered horizontal progress bar drawn in
-    // per-eye screen space (eyeUv). Visible in both eyes so the user can't
-    // miss it when wearing the glasses. Hidden after calibration finishes.
+    // Per-eye UV for UI overlays. The horizontal disparity shifts the
+    // overlay inward in each eye so the two views fuse to a single
+    // virtual panel at finite depth. Without it both eyes render the
+    // overlay at the same X, which puts it at "infinity" - past the
+    // XREAL focal plane - and the user sees a doubled image.
+    vec2 ui_uv = vec2(
+        eyeUv.x - (isLeftEye ? uUiDisparity : -uUiDisparity),
+        eyeUv.y
+    );
+
+    // Calibration overlay: a centered horizontal progress bar.
     if (uCalibProgress >= 0.0) {
         float bx0 = 0.30, bx1 = 0.70;
         float by0 = 0.46, by1 = 0.49;
-        if (eyeUv.x > bx0 && eyeUv.x < bx1 && eyeUv.y > by0 && eyeUv.y < by1) {
+        if (ui_uv.x > bx0 && ui_uv.x < bx1 && ui_uv.y > by0 && ui_uv.y < by1) {
             float fill = bx0 + clamp(uCalibProgress, 0.0, 1.0) * (bx1 - bx0);
-            col = (eyeUv.x < fill) ? vec3(0.2, 1.0, 0.4) : vec3(0.15, 0.15, 0.18);
+            col = (ui_uv.x < fill) ? vec3(0.2, 1.0, 0.4) : vec3(0.15, 0.15, 0.18);
         }
-        // Thin inner border so the bar is readable on any background.
-        bool nearTop    = abs(eyeUv.y - by1) < 0.0015 && eyeUv.x >= bx0 && eyeUv.x <= bx1;
-        bool nearBottom = abs(eyeUv.y - by0) < 0.0015 && eyeUv.x >= bx0 && eyeUv.x <= bx1;
-        bool nearLeft   = abs(eyeUv.x - bx0) < 0.0008 && eyeUv.y >= by0 && eyeUv.y <= by1;
-        bool nearRight  = abs(eyeUv.x - bx1) < 0.0008 && eyeUv.y >= by0 && eyeUv.y <= by1;
+        bool nearTop    = abs(ui_uv.y - by1) < 0.0015 && ui_uv.x >= bx0 && ui_uv.x <= bx1;
+        bool nearBottom = abs(ui_uv.y - by0) < 0.0015 && ui_uv.x >= bx0 && ui_uv.x <= bx1;
+        bool nearLeft   = abs(ui_uv.x - bx0) < 0.0008 && ui_uv.y >= by0 && ui_uv.y <= by1;
+        bool nearRight  = abs(ui_uv.x - bx1) < 0.0008 && ui_uv.y >= by0 && ui_uv.y <= by1;
         if (nearTop || nearBottom || nearLeft || nearRight) col = vec3(1.0);
     }
 
@@ -259,7 +269,7 @@ void main() {
     if (uPlaybackProgress >= 0.0) {
         float bx0 = 0.10, bx1 = 0.90;
         float by0 = 0.045, by1 = 0.062;
-        bool inside = eyeUv.x > bx0 && eyeUv.x < bx1 && eyeUv.y > by0 && eyeUv.y < by1;
+        bool inside = ui_uv.x > bx0 && ui_uv.x < bx1 && ui_uv.y > by0 && ui_uv.y < by1;
         if (inside) {
             float fill = bx0 + clamp(uPlaybackProgress, 0.0, 1.0) * (bx1 - bx0);
             vec3 fillColor;
@@ -267,27 +277,24 @@ void main() {
             else if (uPlaybackSpeed >= 3.5)       fillColor = vec3(1.0, 0.3, 0.3);
             else if (uPlaybackSpeed >= 1.5)       fillColor = vec3(1.0, 0.85, 0.2);
             else                                   fillColor = vec3(0.25, 1.0, 0.45);
-            col = (eyeUv.x < fill) ? fillColor : vec3(0.12, 0.12, 0.15);
+            col = (ui_uv.x < fill) ? fillColor : vec3(0.12, 0.12, 0.15);
         }
-        bool nearTop    = abs(eyeUv.y - by1) < 0.0012 && eyeUv.x >= bx0 && eyeUv.x <= bx1;
-        bool nearBottom = abs(eyeUv.y - by0) < 0.0012 && eyeUv.x >= bx0 && eyeUv.x <= bx1;
-        bool nearLeft   = abs(eyeUv.x - bx0) < 0.0006 && eyeUv.y >= by0 && eyeUv.y <= by1;
-        bool nearRight  = abs(eyeUv.x - bx1) < 0.0006 && eyeUv.y >= by0 && eyeUv.y <= by1;
+        bool nearTop    = abs(ui_uv.y - by1) < 0.0012 && ui_uv.x >= bx0 && ui_uv.x <= bx1;
+        bool nearBottom = abs(ui_uv.y - by0) < 0.0012 && ui_uv.x >= bx0 && ui_uv.x <= bx1;
+        bool nearLeft   = abs(ui_uv.x - bx0) < 0.0006 && ui_uv.y >= by0 && ui_uv.y <= by1;
+        bool nearRight  = abs(ui_uv.x - bx1) < 0.0006 && ui_uv.y >= by0 && ui_uv.y <= by1;
         if (nearTop || nearBottom || nearLeft || nearRight) col = vec3(1.0);
     }
 
-    // Transient HUD overlay (shown briefly after a control change so the
-    // user wearing the glasses gets visual feedback even when the terminal
-    // is hidden). Treats luminance as alpha so the dark background of the
-    // pre-rendered text texture is "transparent".
+    // Transient HUD overlay.
     if (uShowHud == 1 &&
-        eyeUv.x >= uHudRect.x && eyeUv.x <= uHudRect.z &&
-        eyeUv.y >= uHudRect.y && eyeUv.y <= uHudRect.w) {
+        ui_uv.x >= uHudRect.x && ui_uv.x <= uHudRect.z &&
+        ui_uv.y >= uHudRect.y && ui_uv.y <= uHudRect.w) {
         vec2 huv;
-        huv.x = (eyeUv.x - uHudRect.x) / max(1e-6, uHudRect.z - uHudRect.x);
-        // Flip y: hud texture is uploaded with row 0 = top; eyeUv.y has 0
+        huv.x = (ui_uv.x - uHudRect.x) / max(1e-6, uHudRect.z - uHudRect.x);
+        // Flip y: hud texture is uploaded with row 0 = top; ui_uv.y has 0
         // at the bottom of the eye, so we need to invert.
-        huv.y = 1.0 - (eyeUv.y - uHudRect.y) / max(1e-6, uHudRect.w - uHudRect.y);
+        huv.y = 1.0 - (ui_uv.y - uHudRect.y) / max(1e-6, uHudRect.w - uHudRect.y);
         vec3 hud_rgb = texture(uHud, huv).rgb;
         float alpha = clamp(dot(hud_rgb, vec3(0.3, 0.59, 0.11)), 0.0, 1.0);
         col = mix(col, hud_rgb, alpha);
@@ -395,6 +402,11 @@ def main() -> int:
                    help="physical FOV of the fisheye lens in degrees (default 180)")
     p.add_argument("--mute", action="store_true",
                    help="don't play audio (default plays via ffplay/afplay)")
+    p.add_argument("--ui-depth", type=float, default=0.015,
+                   help="per-eye horizontal shift for UI overlays. 0 = "
+                        "rendered at infinity (doubled in glasses); ~0.015 ≈ "
+                        "5 m perceived depth (default, fusable). Higher pulls "
+                        "UI closer; lower pushes it farther.")
     p.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
                    help="rotate per-eye sampling by N degrees CCW (default 0)")
     p.add_argument("--flip-y", action="store_true",
@@ -468,6 +480,7 @@ def main() -> int:
     u_showhud = gl.glGetUniformLocation(program, "uShowHud")
     u_hudrect = gl.glGetUniformLocation(program, "uHudRect")
     u_hud     = gl.glGetUniformLocation(program, "uHud")
+    u_ui_disp = gl.glGetUniformLocation(program, "uUiDisparity")
 
     # Video setup
     video_stream = None
@@ -678,13 +691,17 @@ def main() -> int:
                 w_now, h_now = pygame.display.get_window_size()
                 mx, my = event.pos
                 eye_w = w_now * 0.5
-                eye_x = mx if mx < eye_w else mx - eye_w
+                clicked_left_eye = mx < eye_w
+                eye_x = mx if clicked_left_eye else mx - eye_w
                 eye_uv_x = eye_x / max(1.0, eye_w)
                 eye_uv_y = (h_now - my) / max(1.0, h_now)
-                if (PB_BAR_X0 < eye_uv_x < PB_BAR_X1 and
+                # Apply the same disparity offset the shader uses, so a click
+                # aimed at the displayed bar lands inside the rect bounds.
+                ui_uv_x = eye_uv_x - (args.ui_depth if clicked_left_eye else -args.ui_depth)
+                if (PB_BAR_X0 < ui_uv_x < PB_BAR_X1 and
                         PB_HIT_Y0 < eye_uv_y < PB_HIT_Y1 and
                         video_stream.duration_seconds > 0):
-                    fraction = (eye_uv_x - PB_BAR_X0) / (PB_BAR_X1 - PB_BAR_X0)
+                    fraction = (ui_uv_x - PB_BAR_X0) / (PB_BAR_X1 - PB_BAR_X0)
                     target = fraction * video_stream.duration_seconds
                     audio_lat = (
                         audio_player.seek_latency_seconds if audio_player is not None else 0.0
@@ -770,6 +787,7 @@ def main() -> int:
         gl.glUniform1f(u_pbprog, pb_progress)
         gl.glUniform1i(u_pbpaus, 1 if (video_stream is not None and video_stream.is_paused) else 0)
         gl.glUniform1f(u_pbspd, video_stream.speed if video_stream is not None else 1.0)
+        gl.glUniform1f(u_ui_disp, args.ui_depth)
 
         # HUD: position centered horizontally near the top of each eye, with
         # the rect sized so the texture renders at its native pixel aspect

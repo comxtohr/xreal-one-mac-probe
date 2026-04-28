@@ -49,6 +49,10 @@ class VideoStream:
         self._thread: Optional[threading.Thread] = None
         self._start_wall: Optional[float] = None
 
+        self._paused: bool = False
+        self._speed: float = 1.0
+        self._timeline_dirty: bool = False  # set when pause/speed change so we re-anchor
+
     @property
     def source_size(self) -> Tuple[int, int]:
         return self._source_w, self._source_h
@@ -69,6 +73,38 @@ class VideoStream:
     @property
     def last_error(self) -> Optional[str]:
         return self._error
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    @property
+    def speed(self) -> float:
+        return self._speed
+
+    @property
+    def latest_pts(self) -> float:
+        with self._lock:
+            return self._latest_pts
+
+    def set_paused(self, paused: bool) -> None:
+        with self._lock:
+            if self._paused != paused:
+                self._paused = paused
+                self._timeline_dirty = True
+
+    def toggle_paused(self) -> bool:
+        with self._lock:
+            self._paused = not self._paused
+            self._timeline_dirty = True
+            return self._paused
+
+    def set_speed(self, speed: float) -> None:
+        speed = max(0.1, min(8.0, speed))
+        with self._lock:
+            if abs(self._speed - speed) > 1e-6:
+                self._speed = speed
+                self._timeline_dirty = True
 
     def start(self) -> None:
         if self._running:
@@ -137,6 +173,14 @@ class VideoStream:
             for frame in container.decode(stream):
                 if not self._running:
                     return
+
+                # Pause loop: hold this frame until unpaused. We don't decode
+                # ahead while paused; on resume we re-anchor the wall clock.
+                while self._running and self._paused:
+                    time.sleep(0.05)
+                if not self._running:
+                    return
+
                 rgb = frame.reformat(width=tw, height=th, format="rgb24")
                 arr = rgb.to_ndarray()  # shape (th, tw, 3) uint8
 
@@ -149,10 +193,17 @@ class VideoStream:
                     self._latest_frame = arr
                     self._latest_pts = pts
                     self._frame_count += 1
+                    timeline_dirty = self._timeline_dirty
+                    self._timeline_dirty = False
+                    speed = max(0.01, self._speed)
 
-                # Pace to PTS. If we're behind we don't sleep — better to push
-                # the latest frame and let the renderer drop intermediate ones.
-                target_wall = self._start_wall + pts
+                # Re-anchor the wall-clock reference whenever pause toggled or
+                # speed changed, so resumed playback continues from the
+                # current PTS instead of trying to "catch up".
+                if timeline_dirty:
+                    self._start_wall = time.monotonic() - pts / speed
+
+                target_wall = self._start_wall + pts / speed
                 now = time.monotonic()
                 if target_wall > now:
                     time.sleep(min(target_wall - now, 0.1))

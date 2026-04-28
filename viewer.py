@@ -72,6 +72,9 @@ uniform float uFisheyeFovDeg;  // physical FOV of the fisheye lens (typ 180)
 uniform int   uFlipY;          // 0 = sample with image-space v, 1 = flip
 uniform int   uRot90;          // 0/1/2/3 = 0/90/180/270 degree CCW per-eye rotation
 uniform float uCalibProgress;  // -1 = hide overlay, 0..1 = calibration progress
+uniform float uPlaybackProgress; // -1 = hide, 0..1 = current/duration
+uniform int   uPlaybackPaused;   // 1 = paused (color-coded)
+uniform float uPlaybackSpeed;    // playback rate, color-coded
 
 const float PI = 3.14159265359;
 
@@ -245,6 +248,31 @@ void main() {
         if (nearTop || nearBottom || nearLeft || nearRight) col = vec3(1.0);
     }
 
+    // Playback progress bar at the bottom of each eye. Color encodes state:
+    //   green  = playing 1x
+    //   yellow = playing 2x
+    //   red    = playing 4x
+    //   orange = paused
+    if (uPlaybackProgress >= 0.0) {
+        float bx0 = 0.10, bx1 = 0.90;
+        float by0 = 0.045, by1 = 0.062;
+        bool inside = eyeUv.x > bx0 && eyeUv.x < bx1 && eyeUv.y > by0 && eyeUv.y < by1;
+        if (inside) {
+            float fill = bx0 + clamp(uPlaybackProgress, 0.0, 1.0) * (bx1 - bx0);
+            vec3 fillColor;
+            if (uPlaybackPaused == 1)             fillColor = vec3(1.0, 0.55, 0.1);
+            else if (uPlaybackSpeed >= 3.5)       fillColor = vec3(1.0, 0.3, 0.3);
+            else if (uPlaybackSpeed >= 1.5)       fillColor = vec3(1.0, 0.85, 0.2);
+            else                                   fillColor = vec3(0.25, 1.0, 0.45);
+            col = (eyeUv.x < fill) ? fillColor : vec3(0.12, 0.12, 0.15);
+        }
+        bool nearTop    = abs(eyeUv.y - by1) < 0.0012 && eyeUv.x >= bx0 && eyeUv.x <= bx1;
+        bool nearBottom = abs(eyeUv.y - by0) < 0.0012 && eyeUv.x >= bx0 && eyeUv.x <= bx1;
+        bool nearLeft   = abs(eyeUv.x - bx0) < 0.0006 && eyeUv.y >= by0 && eyeUv.y <= by1;
+        bool nearRight  = abs(eyeUv.x - bx1) < 0.0006 && eyeUv.y >= by0 && eyeUv.y <= by1;
+        if (nearTop || nearBottom || nearLeft || nearRight) col = vec3(1.0);
+    }
+
     fragColor = vec4(col, 1.0);
 }
 """
@@ -404,6 +432,9 @@ def main() -> int:
     u_flip_y = gl.glGetUniformLocation(program, "uFlipY")
     u_rot90  = gl.glGetUniformLocation(program, "uRot90")
     u_calib  = gl.glGetUniformLocation(program, "uCalibProgress")
+    u_pbprog = gl.glGetUniformLocation(program, "uPlaybackProgress")
+    u_pbpaus = gl.glGetUniformLocation(program, "uPlaybackPaused")
+    u_pbspd  = gl.glGetUniformLocation(program, "uPlaybackSpeed")
 
     # Video setup
     video_stream = None
@@ -496,6 +527,21 @@ def main() -> int:
                 elif event.key == pygame.K_l:
                     invert_roll = not invert_roll
                     print(f"\n[invert_roll = {invert_roll}]")
+                elif event.key == pygame.K_SPACE and video_stream is not None:
+                    paused = video_stream.toggle_paused()
+                    if audio_player is not None:
+                        # Audio is only used at 1x speed; keep it muted at
+                        # higher speeds and while paused.
+                        audio_player.set_active(not paused and abs(video_stream.speed - 1.0) < 0.01)
+                    print(f"\n[{'paused' if paused else 'playing'}]")
+                elif event.key in (pygame.K_1, pygame.K_2, pygame.K_4) and video_stream is not None:
+                    new_speed = {pygame.K_1: 1.0, pygame.K_2: 2.0, pygame.K_4: 4.0}[event.key]
+                    video_stream.set_speed(new_speed)
+                    if audio_player is not None:
+                        audio_player.set_active(
+                            not video_stream.is_paused and abs(new_speed - 1.0) < 0.01
+                        )
+                    print(f"\n[speed {new_speed:.0f}x]")
                 elif event.key == pygame.K_UP:
                     fov_diag_deg = max(20.0, fov_diag_deg - 2.0)
                     print(f"\n[fov_diag = {fov_diag_deg:.1f}]")
@@ -585,6 +631,14 @@ def main() -> int:
         gl.glUniform1i(u_rot90, rot90)
         # Show overlay only while not yet calibrated; -1 hides it.
         gl.glUniform1f(u_calib, calib if pose_stream is not None and not calibrated else -1.0)
+
+        if video_stream is not None and video_stream.duration_seconds > 0:
+            pb_progress = max(0.0, min(1.0, video_stream.latest_pts / video_stream.duration_seconds))
+        else:
+            pb_progress = -1.0
+        gl.glUniform1f(u_pbprog, pb_progress)
+        gl.glUniform1i(u_pbpaus, 1 if (video_stream is not None and video_stream.is_paused) else 0)
+        gl.glUniform1f(u_pbspd, video_stream.speed if video_stream is not None else 1.0)
         if video_stream is not None:
             gl.glActiveTexture(gl.GL_TEXTURE0)
             gl.glBindTexture(gl.GL_TEXTURE_2D, video_tex)

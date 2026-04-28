@@ -164,6 +164,8 @@ sudo python3 viewer.py --no-tracker                     # GL-only, no glasses
 | F   | toggle fullscreen |
 | T   | zero view (current heading = forward) |
 | R   | recalibrate gyro (keep glasses still!) |
+| Space | play / pause video |
+| 1 / 2 / 4 | set playback speed (1x / 2x / 4x; audio is muted off 1x) |
 | M   | cycle projection mode (testcard / fisheye / equirect) |
 | ↑/↓ | zoom in / out (decrease / increase rendered FOV) |
 | 0   | reset FOV to the value passed via --fov (default 50) |

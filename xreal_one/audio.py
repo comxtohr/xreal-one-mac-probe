@@ -51,18 +51,33 @@ class AudioPlayer:
 
     def stop(self) -> None:
         self._running = False
-        if self._proc is not None:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=1.5)
-            except (subprocess.TimeoutExpired, OSError):
-                try:
-                    self._proc.kill()
-                except OSError:
-                    pass
-            self._proc = None
+        self._kill_proc()
         if self._thread is not None:
             self._thread.join(timeout=1.5)
+
+    def set_active(self, active: bool) -> None:
+        """Pause / resume audio. When inactive, the underlying process is
+        killed; on resume it is respawned from the file's start. There is
+        no sync to the video position - this is a quick toggle, not a seek."""
+        if active and self._backend is None:
+            return
+        if active and self._proc is None:
+            self._proc = self._spawn_once()
+        elif not active and self._proc is not None:
+            self._kill_proc()
+
+    def _kill_proc(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            self._proc.terminate()
+            self._proc.wait(timeout=1.0)
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+        self._proc = None
 
     def _spawn_once(self) -> Optional[subprocess.Popen]:
         if self._backend == "ffplay":

@@ -75,6 +75,9 @@ uniform float uCalibProgress;  // -1 = hide overlay, 0..1 = calibration progress
 uniform float uPlaybackProgress; // -1 = hide, 0..1 = current/duration
 uniform int   uPlaybackPaused;   // 1 = paused (color-coded)
 uniform float uPlaybackSpeed;    // playback rate, color-coded
+uniform int   uShowHud;          // 1 = draw the transient HUD overlay
+uniform vec4  uHudRect;          // x0, y0, x1, y1 in eye-space UV
+uniform sampler2D uHud;          // RGB texture, dark bg + bright text
 
 const float PI = 3.14159265359;
 
@@ -273,6 +276,23 @@ void main() {
         if (nearTop || nearBottom || nearLeft || nearRight) col = vec3(1.0);
     }
 
+    // Transient HUD overlay (shown briefly after a control change so the
+    // user wearing the glasses gets visual feedback even when the terminal
+    // is hidden). Treats luminance as alpha so the dark background of the
+    // pre-rendered text texture is "transparent".
+    if (uShowHud == 1 &&
+        eyeUv.x >= uHudRect.x && eyeUv.x <= uHudRect.z &&
+        eyeUv.y >= uHudRect.y && eyeUv.y <= uHudRect.w) {
+        vec2 huv;
+        huv.x = (eyeUv.x - uHudRect.x) / max(1e-6, uHudRect.z - uHudRect.x);
+        // Flip y: hud texture is uploaded with row 0 = top; eyeUv.y has 0
+        // at the bottom of the eye, so we need to invert.
+        huv.y = 1.0 - (eyeUv.y - uHudRect.y) / max(1e-6, uHudRect.w - uHudRect.y);
+        vec3 hud_rgb = texture(uHud, huv).rgb;
+        float alpha = clamp(dot(hud_rgb, vec3(0.3, 0.59, 0.11)), 0.0, 1.0);
+        col = mix(col, hud_rgb, alpha);
+    }
+
     fragColor = vec4(col, 1.0);
 }
 """
@@ -385,6 +405,7 @@ def main() -> int:
     args = p.parse_args()
 
     pygame.init()
+    pygame.font.init()
     pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
     pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
     pygame.display.gl_set_attribute(
@@ -436,6 +457,9 @@ def main() -> int:
     u_pbprog = gl.glGetUniformLocation(program, "uPlaybackProgress")
     u_pbpaus = gl.glGetUniformLocation(program, "uPlaybackPaused")
     u_pbspd  = gl.glGetUniformLocation(program, "uPlaybackSpeed")
+    u_showhud = gl.glGetUniformLocation(program, "uShowHud")
+    u_hudrect = gl.glGetUniformLocation(program, "uHudRect")
+    u_hud     = gl.glGetUniformLocation(program, "uHud")
 
     # Video setup
     video_stream = None
@@ -483,6 +507,36 @@ def main() -> int:
     PB_BAR_X0, PB_BAR_X1 = 0.10, 0.90
     PB_HIT_Y0, PB_HIT_Y1 = 0.0, 0.10  # generous vertical hit zone
 
+    # Transient HUD: rendered to a small RGB texture by pygame.font, drawn
+    # by the fragment shader for 1.5 s after each control change so the
+    # user wearing the glasses can see what they just did without looking
+    # at the terminal.
+    hud_font = pygame.font.SysFont("arial", 64, bold=True)
+    hud_texture_id = int(gl.glGenTextures(1))
+    hud_texture_size = [1, 1]
+    hud_until = 0.0
+
+    def _show_hud(message: str, duration: float = 1.5) -> None:
+        nonlocal hud_until
+        text_surface = hud_font.render(message, True, (240, 245, 255), (8, 8, 12))
+        # surfarray gives (W, H, 3); we want (H, W, 3) and contiguous bytes.
+        arr = pygame.surfarray.array3d(text_surface).swapaxes(0, 1)
+        arr = np.ascontiguousarray(arr, dtype=np.uint8)
+        h_tex, w_tex, _ = arr.shape
+        gl.glBindTexture(gl.GL_TEXTURE_2D, hud_texture_id)
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexImage2D(
+            gl.GL_TEXTURE_2D, 0, gl.GL_RGB, w_tex, h_tex, 0,
+            gl.GL_RGB, gl.GL_UNSIGNED_BYTE, arr,
+        )
+        hud_texture_size[0] = w_tex
+        hud_texture_size[1] = h_tex
+        hud_until = time.monotonic() + duration
+
     # Tracker
     pose_stream: Optional[PoseStream] = None
     if not args.no_tracker:
@@ -517,50 +571,50 @@ def main() -> int:
                     running = False
                 elif event.key == pygame.K_t and pose_stream is not None:
                     pose_stream.zero_view()
-                    print("\n[zeroed]")
+                    _show_hud("Zeroed")
                 elif event.key == pygame.K_r and pose_stream is not None:
                     pose_stream.recalibrate()
-                    print("\n[recalibrating]")
+                    _show_hud("Recalibrating")
                 elif event.key == pygame.K_m:
                     proj_mode = (proj_mode + 1) % 5
-                    name = ["testcard", "fisheye", "equirect",
-                            "flat-sbs", "flat-tb"][proj_mode]
-                    print(f"\n[proj mode = {proj_mode} {name}]")
+                    name = ["Test Card", "Fisheye", "Equirect",
+                            "Flat SBS", "Flat TB"][proj_mode]
+                    _show_hud(name)
                 elif event.key == pygame.K_d:
                     show_debug = not show_debug
                 elif event.key == pygame.K_v:
                     flip_y = not flip_y
-                    print(f"\n[flip_y = {flip_y}]")
+                    _show_hud(f"Flip Y: {'on' if flip_y else 'off'}")
                 elif event.key == pygame.K_o:
                     rot90 = (rot90 + 1) % 4
-                    print(f"\n[rotate = {rot90 * 90} deg]")
+                    _show_hud(f"Rotate {rot90 * 90}°")
                 elif event.key == pygame.K_p:
                     invert_pitch = not invert_pitch
-                    print(f"\n[invert_pitch = {invert_pitch}]")
+                    _show_hud(f"Pitch {'inv' if invert_pitch else 'norm'}")
                 elif event.key == pygame.K_y:
                     invert_yaw = not invert_yaw
-                    print(f"\n[invert_yaw = {invert_yaw}]")
+                    _show_hud(f"Yaw {'inv' if invert_yaw else 'norm'}")
                 elif event.key == pygame.K_l:
                     invert_roll = not invert_roll
-                    print(f"\n[invert_roll = {invert_roll}]")
+                    _show_hud(f"Roll {'inv' if invert_roll else 'norm'}")
                 elif event.key == pygame.K_SPACE and video_stream is not None:
                     paused = video_stream.toggle_paused()
                     _sync_audio()
-                    print(f"\n[{'paused' if paused else 'playing'}]")
+                    _show_hud("Paused" if paused else "Playing")
                 elif event.key in (pygame.K_1, pygame.K_2, pygame.K_4) and video_stream is not None:
                     new_speed = {pygame.K_1: 1.0, pygame.K_2: 2.0, pygame.K_4: 4.0}[event.key]
                     video_stream.set_speed(new_speed)
                     _sync_audio()
-                    print(f"\n[speed {new_speed:.0f}x]")
+                    _show_hud(f"{int(new_speed)}x")
                 elif event.key == pygame.K_UP:
                     fov_diag_deg = max(20.0, fov_diag_deg - 2.0)
-                    print(f"\n[fov_diag = {fov_diag_deg:.1f}]")
+                    _show_hud(f"FOV {fov_diag_deg:.0f}°")
                 elif event.key == pygame.K_DOWN:
                     fov_diag_deg = min(120.0, fov_diag_deg + 2.0)
-                    print(f"\n[fov_diag = {fov_diag_deg:.1f}]")
+                    _show_hud(f"FOV {fov_diag_deg:.0f}°")
                 elif event.key == pygame.K_0:
                     fov_diag_deg = args.fov
-                    print(f"\n[fov_diag reset to {fov_diag_deg:.1f}]")
+                    _show_hud(f"FOV {fov_diag_deg:.0f}°")
                 elif event.key == pygame.K_f:
                     is_fullscreen = not is_fullscreen
                     new_flags = pygame.OPENGL | pygame.DOUBLEBUF | (
@@ -587,7 +641,8 @@ def main() -> int:
                     target = fraction * video_stream.duration_seconds
                     video_stream.request_seek(target)
                     _sync_audio()  # immediate; will refresh again next frame after pts updates
-                    print(f"\n[seek to {target:5.1f}s / {video_stream.duration_seconds:5.1f}s]")
+                    mins, secs = divmod(int(target), 60)
+                    _show_hud(f"{mins:d}:{secs:02d}")
 
         w, h = pygame.display.get_window_size()
         gl.glViewport(0, 0, w, h)
@@ -664,6 +719,32 @@ def main() -> int:
         gl.glUniform1f(u_pbprog, pb_progress)
         gl.glUniform1i(u_pbpaus, 1 if (video_stream is not None and video_stream.is_paused) else 0)
         gl.glUniform1f(u_pbspd, video_stream.speed if video_stream is not None else 1.0)
+
+        # HUD: position centered horizontally near the top of each eye, with
+        # the rect sized so the texture renders at its native pixel aspect
+        # (no stretch/squash) regardless of window dims.
+        show_hud_now = time.monotonic() < hud_until
+        gl.glUniform1i(u_showhud, 1 if show_hud_now else 0)
+        if show_hud_now:
+            tex_w, tex_h = hud_texture_size
+            target_h_px = float(h) * 0.08              # ~8% of eye height
+            target_w_px = target_h_px * (tex_w / max(1, tex_h))
+            eye_w_px = max(1.0, w * 0.5)
+            hud_w_eye = target_w_px / eye_w_px
+            hud_h_eye = target_h_px / max(1.0, h)
+            x_center = 0.5
+            y_top = 0.93
+            gl.glUniform4f(
+                u_hudrect,
+                x_center - hud_w_eye * 0.5,
+                y_top - hud_h_eye,
+                x_center + hud_w_eye * 0.5,
+                y_top,
+            )
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, hud_texture_id)
+            gl.glUniform1i(u_hud, 1)
+            gl.glActiveTexture(gl.GL_TEXTURE0)  # restore
         if video_stream is not None:
             gl.glActiveTexture(gl.GL_TEXTURE0)
             gl.glBindTexture(gl.GL_TEXTURE_2D, video_tex)

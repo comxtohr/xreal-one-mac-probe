@@ -15,7 +15,10 @@ keeps them within ~100 ms of each other in practice.
 
 from __future__ import annotations
 
+import atexit
+import os
 import shutil
+import signal
 import subprocess
 from typing import Optional
 
@@ -47,6 +50,10 @@ class AudioPlayer:
         else:
             print("audio: neither ffplay nor afplay found; running silent")
             return
+        # Safety net: even if Python exits via an unhandled exception or
+        # SIGTERM, atexit fires before the interpreter goes away and we
+        # take the audio process down with us.
+        atexit.register(self.stop)
         self.set_state(active=True, speed=1.0, offset_sec=0.0)
 
     def stop(self) -> None:
@@ -92,14 +99,21 @@ class AudioPlayer:
     def _kill_proc(self) -> None:
         if self._proc is None:
             return
+        # SIGKILL the whole process group. ffplay is launched in its own
+        # session (os.setsid in _spawn_once) so this also takes down any
+        # helpers it may have forked. Regular self._proc.kill() would only
+        # signal the parent and could leak audio-holding children.
         try:
-            self._proc.terminate()
-            self._proc.wait(timeout=1.0)
-        except (subprocess.TimeoutExpired, OSError):
+            os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
             try:
                 self._proc.kill()
             except OSError:
                 pass
+        try:
+            self._proc.wait(timeout=0.5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
         self._proc = None
 
     def _spawn_once(self) -> Optional[subprocess.Popen]:
@@ -125,4 +139,8 @@ class AudioPlayer:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            # Put the audio process in its own process group so we can
+            # killpg() to clean up any helpers it forks. Avoids the
+            # "audio still playing after viewer exits" symptom.
+            preexec_fn=os.setsid,
         )

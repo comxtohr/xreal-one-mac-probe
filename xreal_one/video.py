@@ -196,7 +196,25 @@ class VideoStream:
                 except Exception:
                     pass
 
-            self._start_wall = time.monotonic() - start_offset / max(0.01, self._speed)
+            # Audio (ffplay) takes ~100-200 ms to spawn + seek + fill the
+            # CoreAudio buffer. Without compensation, video reaches the
+            # target pts before audio has started, leaving them out of
+            # sync until ffplay catches up. Bias the wall-clock anchor by
+            # this delay only on a fresh seek, not on the natural file
+            # restart at EOF (where there's no audio respawn pending).
+            audio_startup_compensation = 0.15 if start_offset > 0.0 else 0.0
+            self._start_wall = (
+                time.monotonic()
+                - start_offset / max(0.01, self._speed)
+                + audio_startup_compensation
+            )
+
+            # PyAV's container.seek with backward=True lands on the closest
+            # keyframe BEFORE the target. The frames between keyframe and
+            # target are needed for decode-chain consistency but should not
+            # be displayed (they're old content). Skip them silently until
+            # we reach the requested pts.
+            skip_until_pts = start_offset if start_offset > 0.0 else 0.0
 
             for frame in container.decode(stream):
                 if not self._running:
@@ -218,13 +236,19 @@ class VideoStream:
                 if not self._running:
                     return
 
-                rgb = frame.reformat(width=tw, height=th, format="rgb24")
-                arr = rgb.to_ndarray()  # shape (th, tw, 3) uint8
-
                 if frame.pts is not None and time_base > 0:
                     pts = float(frame.pts) * time_base
                 else:
                     pts = self._latest_pts + (1.0 / max(1.0, self._fps))
+
+                # Drop pre-target frames after a seek. They're decoded
+                # silently to keep the codec state valid; nothing visible.
+                if skip_until_pts > 0.0 and pts < skip_until_pts - 0.05:
+                    continue
+                skip_until_pts = 0.0  # caught up; resume normal pacing
+
+                rgb = frame.reformat(width=tw, height=th, format="rgb24")
+                arr = rgb.to_ndarray()  # shape (th, tw, 3) uint8
 
                 with self._lock:
                     self._latest_frame = arr

@@ -1,21 +1,22 @@
 """Lightweight audio playback via an external process.
 
 The viewer's main goal is video + head tracking; audio just needs to come
-out of the speakers. We avoid pulling in a real audio library (sounddevice,
-PortAudio bindings, etc.) by spawning whatever decode-and-play CLI is on
-the system: `ffplay` (looped, cross-platform) preferred, `afplay` as a
-macOS fallback (single-shot — Mac's built-in tool can't loop, so we
-respawn on EOF).
+out of the speakers. We avoid pulling in a real audio library by spawning
+whatever decode-and-play CLI is on the system: `ffplay` (preferred — it
+supports atempo for speed-up and -ss for seek) or `afplay` (macOS fallback;
+supports -r for rate but no seek).
 
-There is no PTS-level sync with the video renderer; both start at roughly
-the same wall-clock instant. For a 3-minute clip that's tight enough.
+When the viewer changes speed/seek/pause, it calls set_state() with the
+new params and we kill+respawn the audio process at the new offset. There
+is no proper PTS-level sync between video and audio — they're both running
+off the same file independently — but the offset re-anchor on speed/seek
+keeps them within ~100 ms of each other in practice.
 """
 
 from __future__ import annotations
 
 import shutil
 import subprocess
-import threading
 from typing import Optional
 
 
@@ -24,17 +25,21 @@ class AudioPlayer:
         self.path = path
         self.loop = loop
         self._proc: Optional[subprocess.Popen] = None
-        self._thread: Optional[threading.Thread] = None
-        self._running = False
         self._backend: Optional[str] = None
+
+        # Desired state. set_state() applies a change by killing the proc
+        # and respawning with new args; reading these as a tuple makes it
+        # cheap to check whether anything changed.
+        self._active = False
+        self._speed = 1.0
+        self._offset = 0.0
 
     @property
     def backend(self) -> Optional[str]:
         return self._backend
 
     def start(self) -> None:
-        if self._running:
-            return
+        """Detect backend and start playback at 1x from offset 0."""
         if shutil.which("ffplay"):
             self._backend = "ffplay"
         elif shutil.which("afplay"):
@@ -42,29 +47,47 @@ class AudioPlayer:
         else:
             print("audio: neither ffplay nor afplay found; running silent")
             return
-
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._run, name="xreal-audio", daemon=True
-        )
-        self._thread.start()
+        self.set_state(active=True, speed=1.0, offset_sec=0.0)
 
     def stop(self) -> None:
-        self._running = False
         self._kill_proc()
-        if self._thread is not None:
-            self._thread.join(timeout=1.5)
 
-    def set_active(self, active: bool) -> None:
-        """Pause / resume audio. When inactive, the underlying process is
-        killed; on resume it is respawned from the file's start. There is
-        no sync to the video position - this is a quick toggle, not a seek."""
-        if active and self._backend is None:
+    def set_state(self, active: bool, speed: float, offset_sec: float) -> None:
+        """Apply (active, speed, offset) atomically. If no relevant param
+        changed and the proc is still alive, it's a no-op."""
+        if self._backend is None and active:
             return
-        if active and self._proc is None:
+        proc_alive = self._proc is not None and self._proc.poll() is None
+        nothing_changed = (
+            active == self._active
+            and abs(speed - self._speed) < 1e-3
+            and abs(offset_sec - self._offset) < 0.05
+            and (proc_alive or not active)
+        )
+        if nothing_changed:
+            return
+
+        self._active = active
+        self._speed = max(0.1, min(8.0, speed))
+        self._offset = max(0.0, offset_sec)
+        self._kill_proc()
+        if active:
             self._proc = self._spawn_once()
-        elif not active and self._proc is not None:
-            self._kill_proc()
+
+    @staticmethod
+    def _atempo_chain(speed: float) -> str:
+        """Build an atempo filter graph that achieves `speed`. Single-stage
+        atempo is limited to [0.5, 2.0]; chain segments to extend the range."""
+        chain = []
+        remaining = speed
+        while remaining > 2.0:
+            chain.append("atempo=2.0")
+            remaining /= 2.0
+        while remaining < 0.5:
+            chain.append("atempo=0.5")
+            remaining *= 2.0
+        chain.append(f"atempo={remaining:.4f}")
+        return ",".join(chain)
 
     def _kill_proc(self) -> None:
         if self._proc is None:
@@ -81,15 +104,20 @@ class AudioPlayer:
 
     def _spawn_once(self) -> Optional[subprocess.Popen]:
         if self._backend == "ffplay":
-            args = [
-                "ffplay", "-nodisp", "-autoexit",
-                "-loglevel", "error",
-            ]
+            args = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"]
             if self.loop:
                 args += ["-loop", "0"]
+            if self._offset > 0.0:
+                args += ["-ss", f"{self._offset:.3f}"]
+            if abs(self._speed - 1.0) > 1e-3:
+                args += ["-af", self._atempo_chain(self._speed)]
             args.append(self.path)
         elif self._backend == "afplay":
-            args = ["afplay", self.path]
+            # afplay has -r for rate (no atempo, so pitch shifts) and no -ss.
+            args = ["afplay"]
+            if abs(self._speed - 1.0) > 1e-3:
+                args += ["-r", f"{self._speed:.4f}"]
+            args.append(self.path)
         else:
             return None
         return subprocess.Popen(
@@ -98,15 +126,3 @@ class AudioPlayer:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-
-    def _run(self) -> None:
-        # ffplay handles looping itself; afplay does not — we restart it.
-        while self._running:
-            self._proc = self._spawn_once()
-            if self._proc is None:
-                return
-            self._proc.wait()
-            if self._backend == "ffplay" or not self.loop:
-                # ffplay -loop 0 only exits on terminate(), and afplay no-loop
-                # mode is intentional.
-                return

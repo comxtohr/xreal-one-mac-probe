@@ -412,6 +412,7 @@ def main() -> int:
         os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
         screen = pygame.display.set_mode(size, flags, vsync=1)
     pygame.display.set_caption("xreal-one viewer (Phase 1: test card)")
+    pygame.mouse.set_visible(True)
 
     print(f"GL context {gl.glGetString(gl.GL_VERSION).decode()}")
     print(f"GLSL       {gl.glGetString(gl.GL_SHADING_LANGUAGE_VERSION).decode()}")
@@ -466,6 +467,21 @@ def main() -> int:
         audio_player.start()
         if audio_player.backend:
             print(f"audio backend: {audio_player.backend}")
+
+    def _sync_audio() -> None:
+        """Re-issue audio state matching current video state (called after
+        any pause/speed/seek change)."""
+        if audio_player is None or video_stream is None:
+            return
+        audio_player.set_state(
+            active=not video_stream.is_paused,
+            speed=video_stream.speed,
+            offset_sec=video_stream.latest_pts,
+        )
+
+    # Progress-bar hit area (matches the shader constants in FRAGMENT_SRC).
+    PB_BAR_X0, PB_BAR_X1 = 0.10, 0.90
+    PB_HIT_Y0, PB_HIT_Y1 = 0.0, 0.10  # generous vertical hit zone
 
     # Tracker
     pose_stream: Optional[PoseStream] = None
@@ -529,19 +545,28 @@ def main() -> int:
                     print(f"\n[invert_roll = {invert_roll}]")
                 elif event.key == pygame.K_SPACE and video_stream is not None:
                     paused = video_stream.toggle_paused()
-                    if audio_player is not None:
-                        # Audio is only used at 1x speed; keep it muted at
-                        # higher speeds and while paused.
-                        audio_player.set_active(not paused and abs(video_stream.speed - 1.0) < 0.01)
+                    _sync_audio()
                     print(f"\n[{'paused' if paused else 'playing'}]")
                 elif event.key in (pygame.K_1, pygame.K_2, pygame.K_4) and video_stream is not None:
                     new_speed = {pygame.K_1: 1.0, pygame.K_2: 2.0, pygame.K_4: 4.0}[event.key]
                     video_stream.set_speed(new_speed)
-                    if audio_player is not None:
-                        audio_player.set_active(
-                            not video_stream.is_paused and abs(new_speed - 1.0) < 0.01
-                        )
+                    _sync_audio()
                     print(f"\n[speed {new_speed:.0f}x]")
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and video_stream is not None:
+                w_now, h_now = pygame.display.get_window_size()
+                mx, my = event.pos
+                eye_w = w_now * 0.5
+                eye_x = mx if mx < eye_w else mx - eye_w
+                eye_uv_x = eye_x / max(1.0, eye_w)
+                eye_uv_y = (h_now - my) / max(1.0, h_now)
+                if (PB_BAR_X0 < eye_uv_x < PB_BAR_X1 and
+                        PB_HIT_Y0 < eye_uv_y < PB_HIT_Y1 and
+                        video_stream.duration_seconds > 0):
+                    fraction = (eye_uv_x - PB_BAR_X0) / (PB_BAR_X1 - PB_BAR_X0)
+                    target = fraction * video_stream.duration_seconds
+                    video_stream.request_seek(target)
+                    _sync_audio()  # immediate; will refresh again next frame after pts updates
+                    print(f"\n[seek to {target:5.1f}s / {video_stream.duration_seconds:5.1f}s]")
                 elif event.key == pygame.K_UP:
                     fov_diag_deg = max(20.0, fov_diag_deg - 2.0)
                     print(f"\n[fov_diag = {fov_diag_deg:.1f}]")

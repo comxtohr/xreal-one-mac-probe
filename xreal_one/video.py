@@ -52,6 +52,7 @@ class VideoStream:
         self._paused: bool = False
         self._speed: float = 1.0
         self._timeline_dirty: bool = False  # set when pause/speed change so we re-anchor
+        self._seek_target: Optional[float] = None  # seconds; consumed by _play_once
 
     @property
     def source_size(self) -> Tuple[int, int]:
@@ -106,6 +107,17 @@ class VideoStream:
                 self._speed = speed
                 self._timeline_dirty = True
 
+    def request_seek(self, pts_seconds: float) -> None:
+        """Schedule a seek to `pts_seconds`. The decoder thread breaks out
+        of its current decode pass and re-opens the container at the new
+        offset on the next iteration."""
+        if self._duration > 0:
+            pts_seconds = max(0.0, min(pts_seconds, self._duration - 0.05))
+        else:
+            pts_seconds = max(0.0, pts_seconds)
+        with self._lock:
+            self._seek_target = pts_seconds
+
     def start(self) -> None:
         if self._running:
             return
@@ -140,6 +152,10 @@ class VideoStream:
             self._eof = True
 
     def _play_once(self) -> None:
+        with self._lock:
+            start_offset = self._seek_target if self._seek_target is not None else 0.0
+            self._seek_target = None
+
         container = av.open(self.path)
         try:
             stream = container.streams.video[0]
@@ -168,15 +184,36 @@ class VideoStream:
             th = self.target_height or self._source_h
 
             time_base = float(stream.time_base) if stream.time_base else 0.0
-            self._start_wall = time.monotonic()
+
+            if start_offset > 0.0 and time_base > 0.0:
+                try:
+                    container.seek(
+                        int(start_offset / time_base),
+                        any_frame=False,
+                        backward=True,
+                        stream=stream,
+                    )
+                except Exception:
+                    pass
+
+            self._start_wall = time.monotonic() - start_offset / max(0.01, self._speed)
 
             for frame in container.decode(stream):
                 if not self._running:
                     return
 
+                # Bail if a seek was requested - _decode_loop will call us
+                # again, picking up the new offset from _seek_target.
+                with self._lock:
+                    if self._seek_target is not None:
+                        return
+
                 # Pause loop: hold this frame until unpaused. We don't decode
                 # ahead while paused; on resume we re-anchor the wall clock.
                 while self._running and self._paused:
+                    with self._lock:
+                        if self._seek_target is not None:
+                            return
                     time.sleep(0.05)
                 if not self._running:
                     return

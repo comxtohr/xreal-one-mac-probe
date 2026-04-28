@@ -104,11 +104,17 @@ class HeadTracker:
         self._last_ts_ns: Optional[int] = None
 
         # Latest magnetometer sample (in IMU body frame, no remap applied
-        # yet — that happens inside _apply_mag_yaw_correction).
+        # yet — that happens inside _compute_mag_heading).
         self._latest_mx: float = 0.0
         self._latest_my: float = 0.0
         self._latest_mz: float = 0.0
         self._mag_seen: bool = False
+        # The mag heading at the last "this is forward" moment (calibration
+        # complete or zero_view). Stored so mag fusion only corrects drift
+        # *relative* to that anchor instead of pulling yaw to absolute
+        # magnetic north — which would make the view appear to spin to a
+        # fixed compass direction shortly after startup.
+        self._mag_heading_anchor: Optional[float] = None
 
     @property
     def is_calibrated(self) -> bool:
@@ -128,16 +134,16 @@ class HeadTracker:
         self._latest_mz = mz
         self._mag_seen = True
 
-    def _apply_mag_yaw_correction(self) -> None:
-        """Pull integrated yaw toward the tilt-compensated magnetic heading.
+    def _compute_mag_heading(self) -> Optional[float]:
+        """Return the tilt-compensated magnetic heading in degrees, or
+        None if no mag sample has been seen yet or the field magnitude
+        is degenerate.
 
-        Uses the same tracker-frame remap as the accelerometer: raw mag axes
-        (x, y, z) -> (z, y, x). If the mag axis convention turns out to be
-        different from accel, the user can disable this with --no-mag and
-        revert to gyro-only yaw.
+        Uses the same tracker-frame remap as the accelerometer: raw mag
+        axes (x, y, z) -> (z, y, x).
         """
-        if self.mag_alpha <= 0.0:
-            return
+        if not self._mag_seen:
+            return None
 
         mx_t = self._latest_mz
         my_t = self._latest_my
@@ -145,7 +151,7 @@ class HeadTracker:
 
         norm = math.sqrt(mx_t * mx_t + my_t * my_t + mz_t * mz_t)
         if norm < 1e-6:
-            return
+            return None
         mx_t /= norm
         my_t /= norm
         mz_t /= norm
@@ -155,20 +161,46 @@ class HeadTracker:
         cp, sp = math.cos(pitch_rad), math.sin(pitch_rad)
         cr, sr = math.cos(roll_rad), math.sin(roll_rad)
 
-        # Rotate the body-frame mag into a horizontal frame using pitch/roll
-        # so we can take a 2-D heading on the horizontal projection.
         mag_x_h = mx_t * cp + my_t * sr * sp + mz_t * cr * sp
         mag_y_h = my_t * cr - mz_t * sr
 
-        mag_heading = math.degrees(math.atan2(-mag_y_h, mag_x_h))
+        return math.degrees(math.atan2(-mag_y_h, mag_x_h))
 
-        # Circular distance between integrated yaw and mag heading, then
-        # nudge yaw toward the heading.
-        diff = mag_heading - self._yaw
+    def _apply_mag_yaw_correction(self) -> None:
+        """Pull integrated yaw toward the *anchored* magnetic heading.
+
+        The anchor is set at calibration completion / zero_view, so the
+        target heading is `(current_mag - anchor)` from the user's chosen
+        forward, not absolute magnetic north. This way mag fusion only
+        cancels gyro drift; it doesn't slowly rotate the scene to align
+        with the compass.
+        """
+        if self.mag_alpha <= 0.0:
+            return
+
+        heading = self._compute_mag_heading()
+        if heading is None:
+            return
+
+        if self._mag_heading_anchor is None:
+            # First mag sample after a (re)anchor event - just record it
+            # and skip correction this tick so we don't immediately yank.
+            self._mag_heading_anchor = heading
+            return
+
+        delta = heading - self._mag_heading_anchor
+        while delta > 180.0:
+            delta -= 360.0
+        while delta < -180.0:
+            delta += 360.0
+
+        target_yaw = self._zero_yaw + delta
+        diff = target_yaw - self._yaw
         while diff > 180.0:
             diff -= 360.0
         while diff < -180.0:
             diff += 360.0
+
         self._yaw = _wrap(self._yaw + self.mag_alpha * diff)
 
     def reset_calibration(self) -> None:
@@ -183,11 +215,18 @@ class HeadTracker:
         self._last_ts_ns = None
         self._mag_seen = False
         self._latest_mx = self._latest_my = self._latest_mz = 0.0
+        self._mag_heading_anchor = None
 
     def zero_view(self) -> None:
         self._zero_pitch = self._pitch
         self._zero_yaw = self._yaw
         self._zero_roll = self._roll
+        # Re-anchor mag heading to the new "this is forward" so mag fusion
+        # keeps yaw at the user's chosen orientation instead of slowly
+        # pulling it back to wherever the compass points.
+        new_anchor = self._compute_mag_heading()
+        if new_anchor is not None:
+            self._mag_heading_anchor = new_anchor
 
     def absolute(self) -> Pose:
         return Pose(self._pitch, self._yaw, self._roll)
@@ -262,10 +301,17 @@ class HeadTracker:
 
                 # Auto-zero so relative pose starts at (0, 0, 0) regardless
                 # of how the glasses were physically oriented during the
-                # calibration phase.
+                # calibration phase. Also seed the mag heading anchor here
+                # so subsequent mag fusion doesn't yank yaw to absolute
+                # compass north on the first tick.
                 self._zero_pitch = self._pitch
                 self._zero_yaw = self._yaw
                 self._zero_roll = self._roll
+                seed_anchor = self._compute_mag_heading()
+                if seed_anchor is not None:
+                    self._mag_heading_anchor = seed_anchor
+                else:
+                    self._mag_heading_anchor = None
 
                 self._last_ts_ns = None
             return None
